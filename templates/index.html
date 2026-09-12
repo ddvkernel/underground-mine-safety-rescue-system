@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mine Safety Monitoring</title>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: Arial, sans-serif; background: #0b1220; color: #ffffff; }
+        .header { padding: 20px 30px; background: #111827; border-bottom: 1px solid #263244; }
+        .header h1 { margin: 0; font-size: 28px; }
+        .header p { margin: 6px 0 0; color: #94a3b8; }
+        .status-bar { display: flex; align-items: center; gap: 10px; padding: 10px 30px;
+                      background: #0f172a; border-bottom: 1px solid #263244; font-size: 14px; }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #64748b; }
+        .status-dot.connected { background: #22c55e; }
+        .main { padding: 25px; }
+        .zones { display: grid; grid-template-columns: 1fr 1fr; gap: 25px; max-width: 1200px; margin: auto; }
+        .zone-card { background: #111827; border: 1px solid #263244; border-radius: 16px; overflow: hidden;
+                     transition: border-color 0.4s; }
+        .zone-card.safe { border-color: #22c55e; }
+        .zone-card.warning { border-color: #f59e0b; }
+        .zone-card.critical { border-color: #ef4444; box-shadow: 0 0 20px rgba(239,68,68,0.35); }
+        .zone-header { padding: 18px 22px; display: flex; justify-content: space-between;
+                       align-items: center; border-bottom: 1px solid #263244; }
+        .zone-header h2 { margin: 0; font-size: 22px; }
+        .risk { padding: 7px 14px; border-radius: 20px; font-weight: bold; font-size: 13px; background: #334155; }
+        .risk.safe { background: #166534; }
+        .risk.warning { background: #a16207; }
+        .risk.critical { background: #991b1b; animation: pulse-badge 1s infinite; }
+        @keyframes pulse-badge { 0%,100%{opacity:1;} 50%{opacity:0.5;} }
+        .sensor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; padding: 22px; }
+        .sensor { background: #0f172a; border-radius: 10px; padding: 15px; }
+        .sensor-label { color: #94a3b8; font-size: 13px; margin-bottom: 7px; }
+        .sensor-value { font-size: 23px; font-weight: bold; }
+        .unit { font-size: 12px; color: #64748b; margin-left: 3px; }
+        .map-section { max-width: 1200px; margin: 30px auto 0; background: #111827;
+                       border: 1px solid #263244; border-radius: 16px; padding: 25px; }
+        .map-section h2 { margin-top: 0; }
+        .map { position: relative; height: 500px; background: #0f172a; border-radius: 12px;
+               overflow: hidden; border: 1px solid #263244; }
+        svg#tunnel-svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        .zone-map { position: absolute; width: 180px; height: 130px; border: 3px solid #64748b;
+                    border-radius: 12px; display: flex; flex-direction: column; justify-content: center;
+                    align-items: center; background: #172033; z-index: 2; transition: border-color 0.4s, background 0.4s; }
+        .zone-map.safe { border-color: #22c55e; background: rgba(34,197,94,0.15); }
+        .zone-map.warning { border-color: #f59e0b; background: rgba(245,158,11,0.15); }
+        .zone-map.critical { border-color: #ef4444; background: rgba(239,68,68,0.2);
+                              animation: pulse-zone 1s infinite; }
+        @keyframes pulse-zone { 0%,100%{box-shadow:0 0 10px rgba(239,68,68,0.4);} 50%{box-shadow:0 0 25px rgba(239,68,68,0.9);} }
+        .zone-map h3 { margin: 0 0 8px; }
+        .zone-map p { margin: 0; color: #94a3b8; font-size: 13px; }
+        #map-zone1 { left: 50px; top: 50px; }
+        #map-zone2 { right: 50px; bottom: 50px; }
+        .worker { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+                  width: 60px; height: 60px; border-radius: 50%; background: #2563eb;
+                  display: flex; align-items: center; justify-content: center; font-size: 27px;
+                  transition: left 1s ease, top 1s ease, box-shadow 0.3s; z-index: 3;
+                  box-shadow: 0 0 20px rgba(37, 99, 235, 0.5); }
+        .worker.alert { background: #dc2626; animation: pulse-worker 0.6s infinite; }
+        @keyframes pulse-worker { 0%,100%{box-shadow:0 0 20px rgba(220,38,38,0.6);} 50%{box-shadow:0 0 40px rgba(220,38,38,1);} }
+        .worker-label { position: absolute; top: 63px; white-space: nowrap; font-size: 12px; color: #cbd5e1; }
+        .direction { margin-top: 18px; text-align: center; font-size: 17px; }
+        .direction strong { color: #60a5fa; }
+        .buzzer-banner { margin-top: 10px; text-align: center; font-size: 16px; font-weight: bold;
+                         color: #ef4444; opacity: 0; transition: opacity 0.3s; }
+        .buzzer-banner.on { opacity: 1; }
+        @media (max-width: 800px) { .zones { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>⛏️ Mine Safety Monitoring System</h1>
+    <p>Real-time environmental and worker safety monitoring</p>
+</div>
+
+<div class="status-bar">
+    <div id="connection-dot" class="status-dot"></div>
+    <span id="connection-text">Connecting to backend...</span>
+</div>
+
+<div class="main">
+    <div class="zones">
+        <div id="card1" class="zone-card">
+            <div class="zone-header">
+                <h2>ZONE 1</h2>
+                <div id="risk1" class="risk">WAITING</div>
+            </div>
+            <div class="sensor-grid">
+                <div class="sensor"><div class="sensor-label">CH₄</div><div id="z1-mq4" class="sensor-value">--</div><span class="unit">ppm</span></div>
+                <div class="sensor"><div class="sensor-label">CO</div><div id="z1-mq7" class="sensor-value">--</div><span class="unit">ppm</span></div>
+                <div class="sensor"><div class="sensor-label">Vibration</div><div id="z1-vibration" class="sensor-value">--</div><span class="unit">g</span></div>
+                <div class="sensor"><div class="sensor-label">RSSI</div><div id="z1-rssi" class="sensor-value">--</div><span class="unit">dBm</span></div>
+            </div>
+        </div>
+
+        <div id="card2" class="zone-card">
+            <div class="zone-header">
+                <h2>ZONE 2</h2>
+                <div id="risk2" class="risk">WAITING</div>
+            </div>
+            <div class="sensor-grid">
+                <div class="sensor"><div class="sensor-label">CH₄</div><div id="z2-mq4" class="sensor-value">--</div><span class="unit">ppm</span></div>
+                <div class="sensor"><div class="sensor-label">CO</div><div id="z2-mq7" class="sensor-value">--</div><span class="unit">ppm</span></div>
+                <div class="sensor"><div class="sensor-label">Vibration</div><div id="z2-vibration" class="sensor-value">--</div><span class="unit">g</span></div>
+                <div class="sensor"><div class="sensor-label">RSSI</div><div id="z2-rssi" class="sensor-value">--</div><span class="unit">dBm</span></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="map-section">
+        <h2>Mine Map — Worker Location</h2>
+        <div class="map">
+            <svg id="tunnel-svg">
+                <line id="tunnel-line" x1="140" y1="115" x2="88%" y2="83%"
+                      stroke="#334155" stroke-width="8" stroke-linecap="round"/>
+            </svg>
+
+            <div id="map-zone1" class="zone-map">
+                <h3>ZONE 1</h3>
+                <p id="map-risk1">WAITING</p>
+            </div>
+            <div id="map-zone2" class="zone-map">
+                <h3>ZONE 2</h3>
+                <p id="map-risk2">WAITING</p>
+            </div>
+
+            <div id="worker" class="worker">
+                👷
+                <div class="worker-label">WORKER</div>
+            </div>
+        </div>
+
+        <div class="direction">Direction: <strong id="direction">WAITING</strong></div>
+        <div id="buzzer-banner" class="buzzer-banner">⚠ BUZZER ACTIVE — APPROACHING DANGER ZONE ⚠</div>
+    </div>
+</div>
+
+<script>
+const socket = io();
+const connectionDot = document.getElementById("connection-dot");
+const connectionText = document.getElementById("connection-text");
+
+socket.on("connect", () => {
+    connectionDot.classList.add("connected");
+    connectionText.innerText = "Connected to live Gateway data";
+});
+socket.on("disconnect", () => {
+    connectionDot.classList.remove("connected");
+    connectionText.innerText = "Backend disconnected";
+});
+
+socket.on("sensor_update", (data) => {
+    updateZone(1, data.zone1);
+    updateZone(2, data.zone2);
+    updateRisk(1, data.zone1);
+    updateRisk(2, data.zone2);
+    updateWorker(data.zone1, data.zone2);
+});
+
+function formatValue(value) {
+    if (value === null || value === undefined) return "--";
+    return Number(value).toFixed(2);
+}
+
+function updateZone(zoneNumber, zone) {
+    if (!zone) return;
+
+    document.getElementById(`z${zoneNumber}-mq4`).innerText =
+        formatValue(zone.ch4_ppm ?? zone.ch4);
+    document.getElementById(`z${zoneNumber}-mq7`).innerText =
+        formatValue(zone.co_ppm ?? zone.co);
+    document.getElementById(`z${zoneNumber}-rssi`).innerText =
+        formatValue(zone.rssi);
+
+    // Use the backend's actual computed vibration (delta-based) —
+    // this is the exact value the risk classifier used, not a recomputed one
+    document.getElementById(`z${zoneNumber}-vibration`).innerText =
+        formatValue(zone.vibration);
+}
+
+function updateRisk(zoneNumber, zone) {
+    if (!zone) return;
+
+    const riskRaw = (zone.risk || zone.risk_status || "WAITING").toUpperCase();
+    const riskClass = riskRaw.toLowerCase(); // "safe" | "warning" | "critical" | "waiting"
+
+    const badge = document.getElementById(`risk${zoneNumber}`);
+    badge.innerText = riskRaw;
+    badge.className = "risk " + riskClass;
+
+    const card = document.getElementById(`card${zoneNumber}`);
+    card.className = "zone-card " + riskClass;
+
+    const mapZone = document.getElementById(`map-zone${zoneNumber}`);
+    mapZone.className = "zone-map " + riskClass;
+    document.getElementById(`map-risk${zoneNumber}`).innerText = riskRaw;
+}
+
+function updateWorker(zone1, zone2) {
+    if (!zone1 || !zone2 || zone1.rssi === null || zone2.rssi === null) return;
+
+    const rssi1 = Number(zone1.rssi);
+    const rssi2 = Number(zone2.rssi);
+
+    // Stronger (less negative) RSSI = closer to that zone
+    const strength1 = Math.abs(rssi1);
+    const strength2 = Math.abs(rssi2);
+    const total = strength1 + strength2;
+    if (total <= 0) return;
+
+    let percentage = strength1 / total;
+    percentage = Math.max(0.15, Math.min(0.85, percentage));
+
+    const worker = document.getElementById("worker");
+    const x = 15 + percentage * 70;
+    const y = 20 + percentage * 60;
+    worker.style.left = x + "%";
+    worker.style.top = y + "%";
+
+    const direction = document.getElementById("direction");
+    let currentZoneNum;
+    if (rssi1 > rssi2) {
+        direction.innerText = "TOWARDS ZONE 1";
+        currentZoneNum = 1;
+    } else if (rssi2 > rssi1) {
+        direction.innerText = "TOWARDS ZONE 2";
+        currentZoneNum = 2;
+    } else {
+        direction.innerText = "BETWEEN ZONES";
+        currentZoneNum = null;
+    }
+
+    // Buzzer visual: reflect whichever zone's buzzer flag is actually on
+    const buzzerOn = (zone1.buzzer === true) || (zone2.buzzer === true);
+    worker.classList.toggle("alert", buzzerOn);
+    document.getElementById("buzzer-banner").classList.toggle("on", buzzerOn);
+
+    // Tunnel line color reflects danger along the route
+    const tunnelLine = document.getElementById("tunnel-line");
+    const anyCritical = (zone1.risk === "CRITICAL") || (zone2.risk === "CRITICAL");
+    const anyWarning = (zone1.risk === "WARNING") || (zone2.risk === "WARNING");
+    tunnelLine.setAttribute("stroke",
+        anyCritical ? "#ef4444" : anyWarning ? "#f59e0b" : "#22c55e");
+}
+</script>
+
+</body>
+</html>
