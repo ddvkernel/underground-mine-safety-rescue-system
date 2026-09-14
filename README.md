@@ -209,6 +209,34 @@ Trains the Random Forest model on gas dataset sequences, connects to the gateway
 python sih_model.py
 ```
 
+### Option C: Run with Docker / Docker Compose (Containerized)
+
+1. **Start the Control Room Dashboard with Docker Compose:**
+   ```bash
+   docker compose up --build -d
+   ```
+   Open `http://localhost:5000` in your browser.
+
+2. **Run the ML Analytics & Insights report generator via Docker Compose:**
+   ```bash
+   docker compose --profile ml run ml-analytics
+   ```
+
+3. **Or run with standard Docker CLI:**
+   ```bash
+   # Build the container image (note the trailing dot '.' for current directory)
+   docker build -t mine-safety-system .
+
+   # Run container (PowerShell on Windows)
+   docker run -d -p 5000:5000 -v ${PWD}/insights:/app/insights --name mine-safety mine-safety-system
+
+   # Run container (Linux / macOS / Bash)
+   docker run -d -p 5000:5000 -v "$(pwd)/insights:/app/insights" --name mine-safety mine-safety-system
+
+   # Run with USB serial hardware pass-through (Linux)
+   docker run -d -p 5000:5000 --device=/dev/ttyUSB0:/dev/ttyUSB0 -e SERIAL_PORT=/dev/ttyUSB0 mine-safety-system
+   ```
+
 ---
 
 ## 🎯 Demo & Presentation Mode

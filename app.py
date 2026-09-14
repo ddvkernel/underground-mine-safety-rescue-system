@@ -1,3 +1,4 @@
+import os
 from flask import Flask, jsonify, render_template
 from flask_socketio import SocketIO
 import serial
@@ -10,8 +11,10 @@ import math
 # ============================================================
 # CONFIGURATION
 # ============================================================
-SERIAL_PORT = "COM5"
-BAUD_RATE = 115200
+SERIAL_PORT = os.environ.get("SERIAL_PORT", "COM5")
+BAUD_RATE = int(os.environ.get("BAUD_RATE", "115200"))
+HOST = os.environ.get("HOST", "0.0.0.0")
+PORT = int(os.environ.get("PORT", "5000"))
 
 CALIBRATION_SAMPLES = 3          # was 15 — cut for demo speed
 CALIBRATION_TIMEOUT_S = 5        # force-complete calibration after this long, no matter what
@@ -570,4 +573,4 @@ if __name__ == "__main__":
     threading.Thread(target=worker_offline_watchdog, daemon=True).start()
     threading.Thread(target=no_data_watchdog, daemon=True).start()
 
-    socketio.run(app, host="127.0.0.1", port=5000, debug=False, allow_unsafe_werkzeug=True)
+    socketio.run(app, host=HOST, port=PORT, debug=False, allow_unsafe_werkzeug=True)

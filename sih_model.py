@@ -87,8 +87,8 @@ VIB_CRITICAL = 1.0
 # SERIAL CONFIGURATION
 # ============================================================
 
-SERIAL_PORT = "COM5"       # Change if required
-BAUD_RATE = 115200
+SERIAL_PORT = os.environ.get("SERIAL_PORT", "COM5")       # Change if required
+BAUD_RATE = int(os.environ.get("BAUD_RATE", 115200))
 ML_INTERVAL_SECONDS = 5.0
 
 
