@@ -17,9 +17,10 @@ ENV/
 # Environment variables & secrets
 .env
 
-# Operating System & IDE
+# Operating System, Office & IDE
 .DS_Store
 Thumbs.db
+~$*.xlsx
 .vscode/
 .idea/
 *.log

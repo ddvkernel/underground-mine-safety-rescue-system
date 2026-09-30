@@ -1,576 +1,1355 @@
-import os
-from flask import Flask, jsonify, render_template
-from flask_socketio import SocketIO
-import serial
-import serial.tools.list_ports
-import threading
-import queue
-import time
-import math
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
-SERIAL_PORT = os.environ.get("SERIAL_PORT", "COM5")
-BAUD_RATE = int(os.environ.get("BAUD_RATE", "115200"))
-HOST = os.environ.get("HOST", "0.0.0.0")
-PORT = int(os.environ.get("PORT", "5000"))
-
-CALIBRATION_SAMPLES = 3          # was 15 — cut for demo speed
-CALIBRATION_TIMEOUT_S = 5        # force-complete calibration after this long, no matter what
-GAS_WARNING_DEVIATION = 0.25
-GAS_CRITICAL_DEVIATION = 0.60
-VIB_WARNING = 0.5
-VIB_CRITICAL = 1.0
-RSSI_CHANGE_THRESHOLD = 3.0
-WORKER_OFFLINE_TIMEOUT = 10.0
-
-# ============================================================
-# FLASK
-# ============================================================
-app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading",
-                     ping_interval=10, ping_timeout=30, logger=False, engineio_logger=False)
-
-# ============================================================
-# LATEST DATA
-# ============================================================
-latest_data = {
-    "zone1": {"mq7": None, "mq4": None, "ax": None, "ay": None, "az": None, "rssi": None,
-              "co_ppm": None, "ch4_ppm": None, "vibration": None,
-              "risk": "CALIBRATING", "risk_status": "CALIBRATING",
-              "movement": "UNKNOWN", "buzzer": False,
-              "calibration_progress": 0, "last_seen": None},
-    "zone2": {"mq7": None, "mq4": None, "ax": None, "ay": None, "az": None, "rssi": None,
-              "co_ppm": None, "ch4_ppm": None, "vibration": None,
-              "risk": "CALIBRATING", "risk_status": "CALIBRATING",
-              "movement": "UNKNOWN", "buzzer": False,
-              "calibration_progress": 0, "last_seen": None}
+<!DOCTYPE html>
+<html lang="en">
+ <head>
+  <meta charset="utf-8"/>
+  <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+  <title>
+   KHANRAKSHAK | Mine Subsidence Command Center
+  </title>
+  <style>
+   :root {
+    --bg: #06101c;
+    --panel: #0b1b2d;
+    --panel2: #10263f;
+    --line: #263f5b;
+    --text: #eaf2fc;
+    --muted: #91a8bf;
+    --safe: #22c55e;
+    --watch: #facc15;
+    --warning: #fb923c;
+    --critical: #ef4444;
+    --blue: #38bdf8;
 }
-
-sos_state = {"active": False, "zone": None, "timestamp": None}
-worker_state = {"online": False, "last_heartbeat": None, "estimated_zone": "UNKNOWN"}
-
-previous_rssi = {1: None, 2: None}
-previous_acceleration = {1: None, 2: None}
-
-# Hysteresis so the worker's "which zone am I near" guess doesn't
-# flip back and forth every second from RSSI noise.
-ZONE_SWITCH_MIN_INTERVAL_S = 4.0
-ZONE_RSSI_DEADBAND = 6.0   # r1 and r2 must differ by more than this to switch at all
-last_zone_switch_time = 0.0
-
-calibration_samples = {1: {"mq7": [], "mq4": []}, 2: {"mq7": [], "mq4": []}}
-baseline = {1: {"mq7": None, "mq4": None}, 2: {"mq7": None, "mq4": None}}
-calibration_done = {1: False, 2: False}
-calibration_start_time = {1: None, 2: None}
-
-# Track whether each zone has received at least one real packet yet
-# (used only for the "waiting for hardware" status shown on dashboard).
-zone_ever_seen_real_data = {1: False, 2: False}
-server_start_time = time.time()
-
-# Manual override: when set, this risk is forced for the zone until cleared.
-manual_override = {1: None, 2: None}
-
-serial_connection = None
-serial_connection_lock = threading.Lock()
-command_queue = queue.Queue()
-sensor_queue = queue.Queue()
-data_lock = threading.Lock()
-
-last_command_signature = {1: None, 2: None}
-last_command_time = {1: 0.0, 2: 0.0}
-COMMAND_MIN_INTERVAL = 1.0
-
-
-# ============================================================
-# CALIBRATION — capped at CALIBRATION_TIMEOUT_S no matter what
-# ============================================================
-def calibrate_zone(zone, mq7, mq4):
-    if calibration_done[zone]:
-        return True
-
-    if calibration_start_time[zone] is None:
-        calibration_start_time[zone] = time.time()
-
-    calibration_samples[zone]["mq7"].append(mq7)
-    calibration_samples[zone]["mq4"].append(mq4)
-    progress = len(calibration_samples[zone]["mq7"])
-
-    with data_lock:
-        zone_key = f"zone{zone}"
-        latest_data[zone_key]["calibration_progress"] = progress
-
-    elapsed = time.time() - calibration_start_time[zone]
-
-    # Force-finish calibration either when we hit the sample count,
-    # OR when the timeout expires — whichever comes first. This is
-    # the fix for indefinite "CALIBRATING" hangs.
-    if progress >= CALIBRATION_SAMPLES or elapsed >= CALIBRATION_TIMEOUT_S:
-        samples_mq7 = calibration_samples[zone]["mq7"] or [mq7]
-        samples_mq4 = calibration_samples[zone]["mq4"] or [mq4]
-        baseline[zone]["mq7"] = sum(samples_mq7) / len(samples_mq7)
-        baseline[zone]["mq4"] = sum(samples_mq4) / len(samples_mq4)
-        calibration_done[zone] = True
-        print(f"[CALIBRATION COMPLETE] Zone {zone} — "
-              f"MQ7 baseline={baseline[zone]['mq7']:.1f}, MQ4 baseline={baseline[zone]['mq4']:.1f} "
-              f"(after {progress} samples, {elapsed:.1f}s)")
-        return True
-
-    return False
-
-
-def deviation_ratio(current, base):
-    if base is None or base == 0:
-        return 0.0
-    return max(0.0, (current - base) / base)
-
-
-def calculate_vibration(zone, ax, ay, az):
-    try:
-        ax, ay, az = float(ax), float(ay), float(az)
-    except Exception:
-        return 0.0
-    previous = previous_acceleration[zone]
-    if previous is None:
-        previous_acceleration[zone] = (ax, ay, az)
-        return 0.0
-    dax, day, daz = ax - previous[0], ay - previous[1], az - previous[2]
-    vibration = math.sqrt(dax**2 + day**2 + daz**2)
-    previous_acceleration[zone] = (ax, ay, az)
-    return vibration
-
-
-def calculate_risk(zone, mq7, mq4, ax, ay, az):
-    vibration = calculate_vibration(zone, ax, ay, az)
-    if not calibrate_zone(zone, mq7, mq4):
-        return ("CALIBRATING", 0.0, 0.0, vibration)
-
-    mq7_dev = deviation_ratio(mq7, baseline[zone]["mq7"])
-    mq4_dev = deviation_ratio(mq4, baseline[zone]["mq4"])
-    co_display = mq7_dev * 100
-    ch4_display = mq4_dev * 100
-
-    if (mq7_dev >= GAS_CRITICAL_DEVIATION or mq4_dev >= GAS_CRITICAL_DEVIATION
-            or vibration >= VIB_CRITICAL):
-        return ("CRITICAL", co_display, ch4_display, vibration)
-    if (mq7_dev >= GAS_WARNING_DEVIATION or mq4_dev >= GAS_WARNING_DEVIATION
-            or vibration >= VIB_WARNING):
-        return ("WARNING", co_display, ch4_display, vibration)
-    return ("SAFE", co_display, ch4_display, vibration)
-
-
-def calculate_movement(zone, current_rssi):
-    if current_rssi is None:
-        return "UNKNOWN"
-    try:
-        current_rssi = float(current_rssi)
-    except Exception:
-        return "UNKNOWN"
-    if current_rssi <= -900:
-        return "UNKNOWN"
-    old_rssi = previous_rssi[zone]
-    if old_rssi is None:
-        previous_rssi[zone] = current_rssi
-        return "UNKNOWN"
-    difference = current_rssi - old_rssi
-    previous_rssi[zone] = current_rssi
-    if difference >= RSSI_CHANGE_THRESHOLD:
-        return "APPROACHING"
-    if difference <= -RSSI_CHANGE_THRESHOLD:
-        return "AWAY"
-    return "STATIONARY"
-
-
-def update_estimated_worker_zone():
-    global last_zone_switch_time
-    r1, r2 = previous_rssi[1], previous_rssi[2]
-
-    if r1 is None and r2 is None:
-        worker_state["estimated_zone"] = "UNKNOWN"
-        return
-
-    # If we only have one zone's RSSI, that's the obvious answer.
-    if r1 is None:
-        candidate = "ZONE2"
-    elif r2 is None:
-        candidate = "ZONE1"
-    else:
-        diff = r1 - r2
-        if abs(diff) < ZONE_RSSI_DEADBAND:
-            # Too close to call — keep whatever we already believe,
-            # don't let tiny noise decide this.
-            return
-        candidate = "ZONE1" if diff > 0 else "ZONE2"
-
-    now = time.time()
-    if candidate != worker_state["estimated_zone"]:
-        if now - last_zone_switch_time < ZONE_SWITCH_MIN_INTERVAL_S:
-            return  # too soon since last switch, ignore this flip
-        last_zone_switch_time = now
-        print(f"[WORKER ZONE] Switched estimate to {candidate}")
-        worker_state["estimated_zone"] = candidate
-
-
-# ============================================================
-# PARSE — SENSOR DATA
-# ============================================================
-def parse_python_data(line):
-    line = line.strip()
-    if not line.startswith("PYTHON_DATA:"):
-        return None
-    try:
-        payload = line.split("PYTHON_DATA:", 1)[1]
-        fields = {}
-        for item in payload.split(","):
-            item = item.strip()
-            if "=" not in item:
-                continue
-            key, value = item.split("=", 1)
-            fields[key.strip().upper()] = value.strip()
-
-        required = ["ZONE", "MQ7", "MQ4", "AX", "AY", "AZ"]
-        missing = [k for k in required if k not in fields]
-        if missing:
-            print(f"[PARSE ERROR] Zone packet missing fields {missing} — raw line: {line}")
-            return None
-
-        zone = int(fields["ZONE"])
-        if zone not in (1, 2):
-            print(f"[PARSE ERROR] Invalid zone number: {zone}")
-            return None
-
-        rssi_raw = fields.get("WRSSI")
-        rssi = float(rssi_raw) if rssi_raw is not None else None
-
-        data = {
-            "mq7": float(fields["MQ7"]),
-            "mq4": float(fields["MQ4"]),
-            "ax": float(fields["AX"]),
-            "ay": float(fields["AY"]),
-            "az": float(fields["AZ"]),
-            "rssi": rssi,
+ * {
+    box-sizing: border-box;
+}
+ body {
+    margin: 0;
+    min-width: 1180px;
+    color: var(--text);
+    font-family: Arial, Helvetica, sans-serif;
+    background: radial-gradient(circle at 12% 0%, rgba(14,165,233,.14), transparent 28%), radial-gradient(circle at 88% 0%, rgba(124,58,237,.13), transparent 26%), var(--bg);
+}
+ .app {
+    padding: 16px;
+}
+ .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 76px;
+    padding: 12px 18px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: rgba(10,25,43,.96);
+}
+ .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+ .logo {
+    width: 43px;
+    height: 43px;
+    display: grid;
+    place-items: center;
+    border-radius: 12px;
+    font-size: 22px;
+    background: linear-gradient(145deg, #0ea5e9, #7c3aed);
+}
+ h1 {
+    margin: 0;
+    font-size: 20px;
+    letter-spacing: 1px;
+}
+ .subtitle {
+    margin-top: 5px;
+    color: var(--muted);
+    font-size: 12px;
+}
+ .status-wrap {
+    display: flex;
+    gap: 9px;
+    align-items: center;
+}
+ .status {
+    padding: 8px 11px;
+    color: var(--muted);
+    font-size: 12px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+}
+ .status strong {
+    margin-left: 4px;
+    color: var(--text);
+}
+ .live-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-right: 5px;
+    border-radius: 50%;
+    background: var(--safe);
+    box-shadow: 0 0 10px var(--safe);
+}
+ .sim-banner {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 11px;
+    padding: 8px 12px;
+    color: #fde68a;
+    font-size: 12px;
+    border: 1px solid rgba(250,204,21,.28);
+    border-radius: 10px;
+    background: rgba(113,84,8,.15);
+}
+ .grid {
+    display: grid;
+    grid-template-columns: 245px 1fr 300px;
+    grid-template-rows: 420px 315px;
+    gap: 12px;
+    margin-top: 12px;
+}
+ .card {
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 15px;
+    background: linear-gradient(145deg, rgba(15,35,57,.96), rgba(7,19,34,.96));
+}
+ .card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 46px;
+    padding: 0 14px;
+    font-size: 12px;
+    font-weight: bold;
+    letter-spacing: .8px;
+    border-bottom: 1px solid rgba(148,163,184,.12);
+}
+ .small {
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: normal;
+}
+ .nodes {
+    grid-column: 1;
+    grid-row: 1;
+}
+ .map-card {
+    grid-column: 2;
+    grid-row: 1;
+}
+ .risk-card {
+    grid-column: 3;
+    grid-row: 1;
+}
+ .table-card {
+    grid-column: 1 / span 2;
+    grid-row: 2;
+}
+ .response-card {
+    grid-column: 3;
+    grid-row: 2;
+}
+ .node-list {
+    padding: 10px;
+}
+ .node-row {
+    display: flex;
+    gap: 9px;
+    align-items: center;
+    margin-bottom: 8px;
+    padding: 9px;
+    border: 1px solid rgba(148,163,184,.1);
+    border-radius: 10px;
+    background: rgba(5,13,24,.48);
+}
+ .node-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    box-shadow: 0 0 10px currentColor;
+}
+ .node-info {
+    flex: 1;
+}
+ .node-name {
+    font-size: 12px;
+    font-weight: bold;
+}
+ .node-meta {
+    margin-top: 3px;
+    color: var(--muted);
+    font-size: 10px;
+}
+ .node-risk {
+    font-size: 10px;
+    font-weight: bold;
+}
+ .mesh-box {
+    margin: 1px 10px 10px;
+    padding: 10px;
+    border: 1px solid rgba(56,189,248,.18);
+    border-radius: 10px;
+    background: rgba(14,116,144,.10);
+}
+ .mesh-row {
+    display: flex;
+    justify-content: space-between;
+    margin: 7px 0;
+    color: var(--muted);
+    font-size: 11px;
+}
+ .mesh-row strong {
+    color: var(--text);
+}
+ .map {
+    position: relative;
+    height: 374px;
+    overflow: hidden;
+    background: linear-gradient(rgba(148,163,184,.09) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.09) 1px, transparent 1px), #09182a;
+    background-size: 28px 28px;
+}
+ .boundary {
+    position: absolute;
+    inset: 38px 42px;
+    border: 2px dashed rgba(56,189,248,.55);
+    border-radius: 22px;
+}
+ .surface-label {
+    position: absolute;
+    top: 48px;
+    left: 56px;
+    color: #7dd3fc;
+    font-size: 10px;
+    letter-spacing: 1px;
+}
+ .underground-panel {
+    position: absolute;
+    top: 39%;
+    left: 27%;
+    width: 49%;
+    height: 28%;
+    border: 1px dashed rgba(203,213,225,.45);
+    border-radius: 50%;
+    background: rgba(148,163,184,.09);
+    transform: rotate(-7deg);
+}
+ .underground-panel::after {
+    content: "UNDERGROUND COAL PANEL";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    color: rgba(226,232,240,.55);
+    font-size: 10px;
+    letter-spacing: 1px;
+    white-space: nowrap;
+    transform: translate(-50%, -50%);
+}
+ .heat {
+    position: absolute;
+    top: 46%;
+    left: 55%;
+    width: 90px;
+    height: 70px;
+    opacity: .04;
+    border-radius: 50%;
+    background: radial-gradient(circle, #ef4444 0%, rgba(251,146,60,.65) 30%, rgba(250,204,21,.18) 58%, transparent 74%);
+    transform: translate(-50%, -50%);
+    transition: .6s ease;
+}
+ .marker, .worker, .exit, .gateway {
+    position: absolute;
+    z-index: 5;
+    text-align: center;
+    transform: translate(-50%, -50%);
+}
+ .circle {
+    display: grid;
+    width: 31px;
+    height: 31px;
+    place-items: center;
+    border: 2px solid currentColor;
+    border-radius: 50%;
+    background: #06101c;
+    font-size: 11px;
+    font-weight: bold;
+    box-shadow: 0 0 18px currentColor;
+}
+ .marker label, .worker label, .exit label, .gateway label {
+    display: block;
+    margin-top: 5px;
+    color: #dbeafe;
+    font-size: 9px;
+    font-weight: bold;
+    white-space: nowrap;
+}
+ .worker-icon {
+    display: grid;
+    width: 38px;
+    height: 38px;
+    place-items: center;
+    border: 2px solid #fde047;
+    border-radius: 50%;
+    background: rgba(68,54,7,.85);
+    font-size: 20px;
+    box-shadow: 0 0 20px rgba(250,204,21,.8);
+    transition: .8s ease;
+}
+ .worker.alert .worker-icon {
+    border-color: var(--critical);
+    background: rgba(127,29,29,.85);
+    animation: pulse .85s infinite;
+}
+ @keyframes pulse {
+     50% {
+        transform: scale(1.15);
+    }
+}
+ .exit-icon, .gateway-icon {
+    display: grid;
+    width: 30px;
+    height: 30px;
+    place-items: center;
+    border: 1px solid var(--safe);
+    border-radius: 8px;
+    background: rgba(34,197,94,.15);
+    color: #bbf7d0;
+    font-size: 15px;
+}
+ .gateway-icon {
+    border-color: var(--blue);
+    background: rgba(56,189,248,.13);
+    color: #bae6fd;
+}
+ .link, .route {
+    position: absolute;
+    z-index: 2;
+    height: 0;
+    opacity: .75;
+    border-top: 2px solid var(--blue);
+    transform-origin: 0 0;
+}
+ .route {
+    opacity: .95;
+    border-top: 3px dashed var(--safe);
+    transition: .6s ease;
+}
+ .legend {
+    position: absolute;
+    bottom: 12px;
+    left: 14px;
+    z-index: 9;
+    padding: 8px 9px;
+    color: var(--muted);
+    font-size: 10px;
+    border: 1px solid rgba(148,163,184,.16);
+    border-radius: 9px;
+    background: rgba(5,13,24,.82);
+}
+ .legend span {
+    margin-right: 9px;
+}
+ .legend i {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-right: 3px;
+    border-radius: 50%;
+}
+ .risk-body {
+    padding: 13px;
+}
+ .risk-orb {
+    display: grid;
+    width: 132px;
+    height: 132px;
+    place-items: center;
+    margin: 0 auto 12px;
+    border: 10px solid var(--safe);
+    border-radius: 50%;
+    box-shadow: 0 0 30px rgba(34,197,94,.22), inset 0 0 20px rgba(34,197,94,.08);
+    transition: .5s ease;
+}
+ .score {
+    font-size: 30px;
+    font-weight: bold;
+    text-align: center;
+}
+ .score-caption {
+    margin-top: 2px;
+    color: var(--muted);
+    font-size: 9px;
+    letter-spacing: 1px;
+    text-align: center;
+}
+ .risk-state {
+    margin-bottom: 12px;
+    color: var(--safe);
+    font-size: 15px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    text-align: center;
+}
+ .reason {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 7px;
+    padding: 8px 9px;
+    border-radius: 8px;
+    background: rgba(5,13,24,.45);
+    font-size: 11px;
+}
+ .reason span {
+    color: var(--muted);
+}
+ .table-wrap {
+    padding: 0 10px 10px;
+}
+ table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+}
+ th, td {
+    padding: 10px 7px;
+    text-align: left;
+    border-bottom: 1px solid rgba(148,163,184,.09);
+}
+ th {
+    color: var(--muted);
+    font-weight: normal;
+}
+ .badge {
+    padding: 4px 7px;
+    color: #06101c;
+    font-size: 9px;
+    font-weight: bold;
+    border-radius: 999px;
+}
+ .response-body {
+    padding: 12px;
+}
+ .alert {
+    padding: 10px;
+    border: 1px solid rgba(34,197,94,.28);
+    border-radius: 10px;
+    background: rgba(22,101,52,.13);
+    transition: .5s ease;
+}
+ .alert h3 {
+    margin: 0;
+    font-size: 12px;
+}
+ .alert p {
+    margin: 6px 0 0;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.45;
+}
+ .route-box {
+    margin-top: 10px;
+    padding: 10px;
+    border: 1px solid rgba(56,189,248,.18);
+    border-radius: 10px;
+    background: rgba(14,116,144,.10);
+    font-size: 11px;
+    line-height: 1.45;
+}
+ .route-box b {
+    color: #bae6fd;
+    font-size: 10px;
+}
+ .worker-box {
+    margin-top: 10px;
+    padding: 10px;
+    border-radius: 10px;
+    background: rgba(5,13,24,.48);
+    font-size: 11px;
+}
+ .worker-row {
+    display: flex;
+    justify-content: space-between;
+    margin: 5px 0;
+    color: var(--muted);
+}
+ .worker-row strong {
+    color: var(--text);
+}
+ .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-top: 12px;
+    padding: 11px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: rgba(10,25,43,.96);
+}
+ button {
+    padding: 9px 11px;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: bold;
+    cursor: pointer;
+    border: 1px solid rgba(148,163,184,.25);
+    border-radius: 9px;
+    background: #122b47;
+}
+ button:hover {
+    border-color: var(--blue);
+    background: #173a60;
+}
+ button.warn {
+    border-color: rgba(251,146,60,.42);
+    background: rgba(120,74,8,.6);
+}
+ button.danger {
+    border-color: rgba(239,68,68,.45);
+    background: rgba(127,29,29,.6);
+}
+ button.good {
+    border-color: rgba(34,197,94,.45);
+    background: rgba(20,83,45,.6);
+}
+ .demo-progress {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 11px;
+}
+ .progress-bar {
+    width: 180px;
+    height: 7px;
+    overflow: hidden;
+    border-radius: 99px;
+    background: rgba(148,163,184,.15);
+}
+ .progress {
+    width: 5%;
+    height: 100%;
+    border-radius: 99px;
+    background: linear-gradient(90deg, var(--safe), var(--watch), var(--warning), var(--critical));
+    transition: .6s ease;
+}
+  </style>
+  <style>
+   .hw-badge {
+    float:right;
+    color:#55e6a5;
+    border:1px solid #55e6a5;
+    padding:6px 10px;
+    border-radius:4px;
+    font-size:11px;
+    letter-spacing:.08em;
+    background:rgba(85,230,165,.08)
+}
+.hardware-strip {
+    background:linear-gradient(90deg,rgba(85,230,165,.12),rgba(85,230,165,.04));
+    border-top:1px solid rgba(85,230,165,.35);
+    border-bottom:1px solid rgba(85,230,165,.35);
+    padding:10px 14px;
+    font-size:12px;
+    color:#b7f0d6;
+    letter-spacing:.06em
+}
+.hw-dot {
+    display:inline-block;
+    width:8px;
+    height:8px;
+    border-radius:50%;
+    background:#55e6a5;
+    margin-right:8px;
+    box-shadow:0 0 10px #55e6a5,0 0 20px #55e6a5
+}
+.node-status {
+    color:#55e6a5
+}
+/* Ensure text is visible on blue background without changing theme colors */ body, .dashboard, .panel, .card, .content, .section, .grid, .info-block {
+    color:#eaf6ff !important;
+}
+h1, h2, h3, h4, h5, h6, p, li, td, th, span, div {
+    color:inherit;
+}
+  </style>
+ </head>
+ <body>
+  <div class="app">
+   <header class="topbar">
+    <div class="brand">
+     <div class="logo">
+      ⛰
+     </div>
+     <div>
+      <h1>
+       KHANRAKSHAK
+      </h1>
+      <div class="subtitle">
+       Surface Deformation Digital Twin &amp; Worker Early-Warning Control Room
+      </div>
+     </div>
+    </div>
+    <div class="status-wrap">
+     <div class="status">
+      <span class="live-dot">
+      </span>
+      System
+      <strong>
+       ONLINE
+      </strong>
+     </div>
+     <div class="status">
+      Nodes
+      <strong>
+       4 / 4
+      </strong>
+     </div>
+     <div class="status">
+      Mesh
+      <strong id="meshHealth">
+       96%
+      </strong>
+     </div>
+     <div class="status">
+      Mode
+      <strong id="modeText">
+       SAFE
+      </strong>
+     </div>
+     <div class="status">
+      Sync
+      <strong id="syncText">
+       1s ago
+      </strong>
+     </div>
+    </div>
+    <div class="hardware-strip">
+     <span class="hw-dot">
+     </span>
+     KHANRAKSHAK HARDWARE ACTIVE · 3 NODES ONLINE · LoRa MESH HEALTHY · GATEWAY: ONLINE · WORKER TAG: CONNECTED
+    </div>
+   </header>
+   <div class="sim-banner">
+    <span>
+     <b>
+      :
+     </b>
+     . .
+    </span>
+    <span id="clock">
+     00:00:00
+    </span>
+   </div>
+   <main class="grid">
+    <section class="card nodes">
+     <div class="card-head">
+      KHANRAKSHAK
+      <span class="small">
+       LIVE HARDWARE HEALTH
+       <span class="hw-badge">
+        ● HARDWARE LINKED · 3/3 NODES
+       </span>
+      </span>
+     </div>
+     <div class="node-list" id="nodeList">
+     </div>
+     <div class="mesh-box">
+      <div class="mesh-row">
+       <span>
+        Gateway
+       </span>
+       <strong>
+        ONLINE
+       </strong>
+      </div>
+      <div class="mesh-row">
+       <span>
+        Primary route
+       </span>
+       <strong id="meshRoute">
+        N2 → GW
+       </strong>
+      </div>
+      <div class="mesh-row">
+       <span>
+        Hop count
+       </span>
+       <strong id="hopCount">
+        1–2 hops
+       </strong>
+      </div>
+      <div class="mesh-row">
+       <span>
+        Delivery
+       </span>
+       <strong id="delivery">
+        98.6%
+       </strong>
+      </div>
+     </div>
+    </section>
+    <section class="card map-card">
+     <div class="card-head">
+      GIS DEFORMATION &amp; RISK FIELD
+      <span class="small" id="mapTitle">
+       Mine Panel A — Stable Surface
+      </span>
+     </div>
+     <div class="map" id="map">
+      <div class="boundary">
+      </div>
+      <div class="surface-label">
+       SURFACE MONITORING GRID
+      </div>
+      <div class="underground-panel">
+      </div>
+      <div class="heat" id="heat">
+      </div>
+      <div class="link" id="l12">
+      </div>
+      <div class="link" id="l23">
+      </div>
+      <div class="link" id="l34">
+      </div>
+      <div class="link" id="lgw">
+      </div>
+      <div class="route" id="routeLine">
+      </div>
+      <div class="marker" id="m1" style="left:24%;top:28%">
+       <div class="circle">
+        N1
+       </div>
+       <label>
+        NODE 01
+       </label>
+      </div>
+      <div class="marker" id="m2" style="left:54%;top:31%">
+       <div class="circle">
+        N2
+       </div>
+       <label>
+        NODE 02
+       </label>
+      </div>
+      <div class="marker" id="m3" style="left:63%;top:61%">
+       <div class="circle">
+        N3
+       </div>
+       <label>
+        NODE 03
+       </label>
+      </div>
+      <div class="marker" id="m4" style="left:29%;top:71%">
+       <div class="circle">
+        N4
+       </div>
+       <label>
+        NODE 04
+       </label>
+      </div>
+      <div class="worker" id="worker" style="left:48%;top:52%">
+       <div class="worker-icon">
+        👷
+       </div>
+       <label>
+        WORKER W07
+       </label>
+      </div>
+      <div class="exit" style="left:78%;top:80%">
+       <div class="exit-icon">
+        ⇩
+       </div>
+       <label>
+        SOUTH EXIT
+       </label>
+      </div>
+      <div class="exit" style="left:80%;top:18%">
+       <div class="exit-icon">
+        ⇧
+       </div>
+       <label>
+        NORTH EXIT
+       </label>
+      </div>
+      <div class="gateway" style="left:87%;top:51%">
+       <div class="gateway-icon">
+        ⌁
+       </div>
+       <label>
+        GATEWAY
+       </label>
+      </div>
+      <div class="legend">
+       <span>
+        <i style="background:#22c55e">
+        </i>
+        Safe
+       </span>
+       <span>
+        <i style="background:#facc15">
+        </i>
+        Watch
+       </span>
+       <span>
+        <i style="background:#fb923c">
+        </i>
+        Warning
+       </span>
+       <span>
+        <i style="background:#ef4444">
+        </i>
+        Critical
+       </span>
+       <span>
+        <i style="background:#38bdf8">
+        </i>
+        Mesh
+       </span>
+      </div>
+     </div>
+    </section>
+    <section class="card risk-card">
+     <div class="card-head">
+      AI RISK ASSESSMENT
+      <span class="small">
+       Explainable
+      </span>
+     </div>
+     <div class="risk-body">
+      <div class="risk-orb" id="riskOrb">
+       <div>
+        <div class="score" id="riskScore">
+         12%
+        </div>
+        <div class="score-caption">
+         RISK SCORE
+        </div>
+       </div>
+      </div>
+      <div class="risk-state" id="riskState">
+       SAFE
+      </div>
+      <div class="reason">
+       <span>
+        Tilt trend
+       </span>
+       <b id="tiltText">
+        Stable
+       </b>
+      </div>
+      <div class="reason">
+       <span>
+        Displacement
+       </span>
+       <b id="dispText">
+        Stable
+       </b>
+      </div>
+      <div class="reason">
+       <span>
+        Crack sensor
+       </span>
+       <b id="crackText">
+        None
+       </b>
+      </div>
+      <div class="reason">
+       <span>
+        Neighbour agreement
+       </span>
+       <b id="neighborText">
+        0 / 3
+       </b>
+      </div>
+      <div class="reason">
+       <span>
+        Moisture context
+       </span>
+       <b id="waterText">
+        Dry
+       </b>
+      </div>
+     </div>
+    </section>
+    <section class="card table-card">
+     <div class="card-head">
+      NODE TELEMETRY
+      <span class="small">
+       Tilt • Displacement • Vibration • Crack • Moisture • Power
+      </span>
+     </div>
+     <div class="table-wrap">
+      <table>
+       <thead>
+        <tr>
+         <th>
+          Node
+         </th>
+         <th>
+          Tilt
+         </th>
+         <th>
+          Displacement
+         </th>
+         <th>
+          Vibration
+         </th>
+         <th>
+          Crack
+         </th>
+         <th>
+          Moisture
+         </th>
+         <th>
+          Battery
+         </th>
+         <th>
+          RSSI
+         </th>
+         <th>
+          Mode
+         </th>
+         <th>
+          Risk
+         </th>
+        </tr>
+       </thead>
+       <tbody id="telemetry">
+       </tbody>
+      </table>
+     </div>
+    </section>
+    <section class="card response-card">
+     <div class="card-head">
+      RESPONSE &amp; WORKER SAFETY
+      <span class="small">
+       LoRa action layer
+      </span>
+     </div>
+     <div class="response-body">
+      <div class="alert" id="alertBox">
+       <h3 id="alertTitle">
+        ✓ No active emergency
+       </h3>
+       <p id="alertText">
+        All surface deformation readings remain within the calibrated baseline.
+       </p>
+      </div>
+      <div class="route-box">
+       <b>
+        RECOMMENDED EVACUATION PATH
+       </b>
+       <div id="routeText" style="margin-top:6px">
+        W07 → Access B → South Exit
+        <br/>
+        <span class="small">
+         Shortest safe route under normal conditions.
+        </span>
+       </div>
+      </div>
+      <div class="worker-box">
+       <div class="worker-row">
+        <span>
+         Worker
+        </span>
+        <strong>
+         W07
+        </strong>
+       </div>
+       <div class="worker-row">
+        <span>
+         Current zone
+        </span>
+        <strong id="workerZone">
+         ZONE B
+        </strong>
+       </div>
+       <div class="worker-row">
+        <span>
+         LoRa tag
+        </span>
+        <strong id="tagState">
+         HEARTBEAT OK
+        </strong>
+       </div>
+       <div class="worker-row">
+        <span>
+         Buzzer / LED
+        </span>
+        <strong id="buzzerState">
+         OFF
+        </strong>
+       </div>
+      </div>
+     </div>
+    </section>
+   </main>
+   <section class="controls">
+    <button class="good" onclick="autoDemo()">
+     ▶ Auto Demo
+    </button>
+    <button class="warn" onclick="setPhase('watch')">
+     1. Deformation
+    </button>
+    <button class="warn" onclick="setPhase('warning')">
+     2. Correlated Risk
+    </button>
+    <button class="danger" onclick="setPhase('critical')">
+     3. Crack / Critical
+    </button>
+    <button class="warn" onclick="toggleWater()">
+     4. Add Water
+    </button>
+    <button class="danger" onclick="workerAlert()">
+     5. Worker Alert
+    </button>
+    <button onclick="toggleRelay()">
+     6. Fail Relay
+    </button>
+    <button class="good" onclick="recovery()">
+     7. Recovery
+    </button>
+    <button onclick="resetDemo()">
+     Reset
+    </button>
+    <div class="demo-progress">
+     <span id="phaseLabel">
+      Baseline
+     </span>
+     <div class="progress-bar">
+      <div class="progress" id="progress">
+      </div>
+     </div>
+    </div>
+   </section>
+  </div>
+  <script>
+   const app = {
+     phase: "safe", water: false, workerAlert: false, relayFailure: false, startedAt: Date.now(), nodes: [ {
+        id:"N1", tilt:0.11, disp:0.8, vib:0.03, crack:"No", moisture:12, battery:94, rssi:-67, mode:"SLEEP", risk:"SAFE"
+    }, {
+        id:"N2", tilt:0.15, disp:1.1, vib:0.04, crack:"No", moisture:13, battery:91, rssi:-70, mode:"SLEEP", risk:"SAFE"
+    }, {
+        id:"N3", tilt:0.09, disp:0.7, vib:0.03, crack:"No", moisture:11, battery:89, rssi:-73, mode:"SLEEP", risk:"SAFE"
+    }, {
+        id:"N4", tilt:0.10, disp:0.9, vib:0.02, crack:"No", moisture:14, battery:92, rssi:-69, mode:"SLEEP", risk:"SAFE"
+    }
+    ]
+};
+ function riskColor(risk) {
+     return {
+        SAFE:"#22c55e", WATCH:"#facc15", WARNING:"#fb923c", CRITICAL:"#ef4444"
+    }
+    [risk] || "#94a3b8";
+}
+ function currentProfile() {
+     if (app.phase === "safe") {
+         return {
+            state:"SAFE", score:12, heat:[90,70,.04], map:"Mine Panel A — Stable Surface", mode:"SAFE", progress:"5%", label:"Baseline", tilt:"Stable", disp:"Stable", crack:"None", neighbor:"0 / 3", water:"Dry"
+        };
+    }
+     if (app.phase === "watch") {
+         return {
+            state:"WATCH", score:37, heat:[135,105,.18], map:"Early Local Deformation — Node 02", mode:"WATCH", progress:"28%", label:"Early deformation", tilt:"Rising", disp:"Increasing", crack:"None", neighbor:"1 / 4", water:app.water ? "Moist" : "Dry"
+        };
+    }
+     if (app.phase === "warning") {
+         return {
+            state:"WARNING", score:65, heat:[200,150,.32], map:"Correlated Deformation — Nodes 02 & 03", mode:"WARNING", progress:"55%", label:"Spatial correlation", tilt:"Accelerating", disp:"Rising", crack:"None", neighbor:"2 / 4", water:app.water ? "Wet depression" : "Dry"
+        };
+    }
+     if (app.phase === "critical") {
+         return {
+            state:"CRITICAL", score:89, heat:[270,210,.55], map:"CRITICAL SUBSIDENCE RISK — Zone B2–C3", mode:"CRITICAL", progress:"82%", label:"Critical response", tilt:"High acceleration", disp:"Accelerating", crack:"Detected", neighbor:"3 / 4", water:app.water ? "Water detected" : "Dry"
+        };
+    }
+     return {
+        state:"WATCH", score:29, heat:[135,105,.18], map:"Recovery Monitoring — Stability Confirmation Required", mode:"RECOVERY", progress:"92%", label:"Hysteresis recovery", tilt:"Reducing", disp:"Settling", crack:"Logged", neighbor:"0 / 3", water:"Drying"
+    };
+}
+ function updateNodes() {
+    const noise = () => (Math.random() - 0.5) * 0.04;
+     app.nodes.forEach((node, index) => {
+         if (app.phase === "safe") {
+            node.tilt = 0.10 + noise();
+            node.disp = 0.85 + noise() * 4;
+            node.vib = 0.03 + noise();
+            node.mode = "SLEEP";
+            node.risk = "SAFE";
+            node.crack = "No";
         }
-        return (zone, data)
-
-    except Exception as error:
-        print("[PARSE ERROR]", error, "| raw line:", line)
-        return None
-
-
-def parse_worker_line(line):
-    line = line.strip()
-
-    if line.startswith("WORKER_SOS:"):
-        payload = line.split("WORKER_SOS:", 1)[1]
-        fields = dict(item.split("=", 1) for item in payload.split(",") if "=" in item)
-        state = fields.get("STATE", "0") == "1"
-        update_estimated_worker_zone()
-        with data_lock:
-            sos_state["active"] = state
-            sos_state["zone"] = worker_state["estimated_zone"] if state else None
-            sos_state["timestamp"] = time.time() if state else None
-        emit_dashboard_state()
-        return True
-
-    if line.startswith("WORKER_HEARTBEAT:"):
-        with data_lock:
-            worker_state["online"] = True
-            worker_state["last_heartbeat"] = time.time()
-        return True
-
-    return False
-
-
-def worker_offline_watchdog():
-    while True:
-        time.sleep(2)
-        with data_lock:
-            if (worker_state["last_heartbeat"] is not None
-                    and time.time() - worker_state["last_heartbeat"] > WORKER_OFFLINE_TIMEOUT):
-                if worker_state["online"]:
-                    print("[WORKER OFFLINE] No heartbeat received recently")
-                worker_state["online"] = False
-        emit_dashboard_state()
-
-
-# ============================================================
-# EMIT DASHBOARD STATE
-# ============================================================
-def emit_dashboard_state():
-    try:
-        with data_lock:
-            payload = {
-                "zone1": dict(latest_data["zone1"]),
-                "zone2": dict(latest_data["zone2"]),
-                "sos": dict(sos_state),
-                "worker": dict(worker_state),
+         if (app.phase === "watch") {
+             if (index === 1) {
+                node.tilt = 1.15 + noise();
+                node.disp = 5.3 + noise() * 8;
+                node.vib = 0.21 + noise();
+                node.mode = "WATCH";
+                node.risk = "WATCH";
+            } else {
+                node.mode = "SLEEP";
+                node.risk = "SAFE";
+                node.crack = "No";
             }
-        socketio.emit("sensor_update", payload)
-    except Exception as error:
-        print("[DASHBOARD EMIT ERROR]", error)
-
-
-# ============================================================
-# PROCESS ONE ZONE
-# ============================================================
-def process_zone(zone, data):
-    # Manual override wins over everything — instant control for demo.
-    if manual_override[zone] is not None:
-        risk = manual_override[zone]
-        co_display, ch4_display, vibration = data.get("mq7", 0), data.get("mq4", 0), data.get("vibration", 0.3)
-        movement = calculate_movement(zone, data.get("rssi"))
-        buzzer = risk in ("WARNING", "CRITICAL")
-    else:
-        risk, co_display, ch4_display, vibration = calculate_risk(
-            zone, data["mq7"], data["mq4"], data["ax"], data["ay"], data["az"])
-        movement = calculate_movement(zone, data["rssi"])
-        buzzer = (movement == "APPROACHING" and risk in ("WARNING", "CRITICAL")) or risk == "CRITICAL"
-
-    update_estimated_worker_zone()
-
-    zone_key = "zone1" if zone == 1 else "zone2"
-    with data_lock:
-        latest_data[zone_key].update({
-            "mq7": data["mq7"], "mq4": data["mq4"],
-            "ax": data["ax"], "ay": data["ay"], "az": data["az"],
-            "rssi": data["rssi"],
-            "co_ppm": co_display, "ch4_ppm": ch4_display,
-            "co": co_display, "ch4": ch4_display,
-            "vibration": vibration,
-            "risk": risk, "risk_status": risk,
-            "movement": movement, "buzzer": buzzer,
-            "last_seen": time.time(),
-        })
-
-    print(f"ZONE {zone} | RISK={risk} | CO={co_display:.1f} | CH4={ch4_display:.1f} | "
-          f"VIB={vibration:.3f} | RSSI={data['rssi']} | BUZZER={'ON' if buzzer else 'OFF'}")
-
-    # Only forward this zone's command to the worker if the worker is
-    # currently estimated to be near THIS zone (stops cross-zone
-    # flicker) — the worker only ever hears the zone it's near.
-    zone_label = "ZONE1" if zone == 1 else "ZONE2"
-    is_relevant_to_worker = (worker_state["estimated_zone"] == zone_label
-                              or worker_state["estimated_zone"] == "UNKNOWN")
-
-    if is_relevant_to_worker:
-        send_worker_command(zone, risk, data["rssi"], buzzer)
-    emit_dashboard_state()
-
-
-def send_worker_command(zone, risk, rssi, buzzer):
-    buzzer_value = "ON" if buzzer else "OFF"
-    rssi_str = f"{rssi:.0f}" if rssi is not None else "NA"
-    command = f"PYTHON_COMMAND:ZONE={zone},RISK={risk},ALERT={risk},WRSSI={rssi_str},BUZZER={buzzer_value}"
-
-    signature = (risk, buzzer_value)
-    now = time.monotonic()
-    if (signature == last_command_signature[zone]
-            and (now - last_command_time[zone]) < COMMAND_MIN_INTERVAL):
-        return
-
-    last_command_signature[zone] = signature
-    last_command_time[zone] = now
-    command_queue.put(command)
-    print("[TO GATEWAY]", command)
-
-
-def clear_sos():
-    with data_lock:
-        sos_state["active"] = False
-        sos_state["zone"] = None
-        sos_state["timestamp"] = None
-    emit_dashboard_state()
-
-
-# ============================================================
-# DIAGNOSTIC WATCHDOG
-# Prints a loud, explicit warning if no real sensor packet has
-# arrived within a few seconds of startup — this is what used to
-# be silently masked by the simulator. No fake data is generated;
-# this only prints guidance so you can fix the actual connection.
-# ============================================================
-def no_data_watchdog():
-    time.sleep(6)
-    while True:
-        with data_lock:
-            missing = [z for z in (1, 2) if not zone_ever_seen_real_data[z]]
-        if missing:
-            print()
-            print("############################################################")
-            print(f"[NO DATA WARNING] Zone(s) {missing} have NOT sent a single")
-            print("real PYTHON_DATA packet since startup. Dashboard will stay")
-            print("on CALIBRATING until real data arrives. Check:")
-            print(f"  1. Is the gateway ESP32 actually plugged in via USB?")
-            print(f"  2. Is {SERIAL_PORT} still the correct COM port? (it can")
-            print("     change after unplug/replug — check Device Manager)")
-            print("  3. Is the gateway's own Serial Monitor closed? Only ONE")
-            print("     program (this script OR Arduino/PlatformIO monitor)")
-            print("     can hold a COM port open at a time.")
-            print("  4. Do you see '[SERIAL] PYTHON_DATA:...' lines printing")
-            print("     above? If nothing at all is printing under [SERIAL],")
-            print("     the port opened but the gateway isn't sending data —")
-            print("     check the gateway's own LoRa receive logic/wiring.")
-            print("############################################################")
-            print()
-        time.sleep(10)
-
-
-# ============================================================
-# THREADS
-# ============================================================
-def serial_writer():
-    global serial_connection
-    while True:
-        command = command_queue.get()
-        try:
-            sent = False
-            for _ in range(10):
-                with serial_connection_lock:
-                    ser = serial_connection
-                    if ser is not None and ser.is_open:
-                        try:
-                            ser.write((command + "\n").encode("utf-8"))
-                            sent = True
-                        except Exception as error:
-                            print("[COMMAND WRITE ERROR]", error)
-                        break
-                time.sleep(0.1)
-            print("[COMMAND SENT]" if sent else "[COMMAND DROPPED]", command)
-        except Exception as error:
-            print("[WRITER ERROR]", error)
-        finally:
-            command_queue.task_done()
-
-
-def dashboard_emitter():
-    while True:
-        try:
-            emit_dashboard_state()
-        except Exception as error:
-            print("[DASHBOARD ERROR]", error)
-        time.sleep(0.5)
-
-
-def serial_reader():
-    global serial_connection
-    while True:
-        ser = None
-        try:
-            print(f"CONNECTING TO GATEWAY on {SERIAL_PORT}")
-            ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.2, write_timeout=0.2)
-            with serial_connection_lock:
-                serial_connection = ser
-            print("GATEWAY CONNECTED — WAITING FOR LIVE DATA...")
-
-            while True:
-                line = ser.readline().decode("utf-8", errors="ignore").strip()
-                if not line:
-                    continue
-                print("[SERIAL]", line)
-
-                if parse_worker_line(line):
-                    continue
-
-                result = parse_python_data(line)
-                if result is None:
-                    continue
-                zone, data = result
-                zone_ever_seen_real_data[zone] = True
-                sensor_queue.put((zone, data))
-
-        except serial.SerialException as error:
-            print("SERIAL ERROR:", error, "— retrying in 2s")
-            time.sleep(2)
-        except Exception as error:
-            print("SERIAL READER ERROR:", error)
-            time.sleep(2)
-        finally:
-            with serial_connection_lock:
-                serial_connection = None
-            if ser is not None:
-                try:
-                    ser.close()
-                except Exception:
-                    pass
-
-
-def sensor_processor():
-    while True:
-        zone, data = sensor_queue.get()
-        try:
-            process_zone(zone, data)
-        except Exception as error:
-            print("[SENSOR PROCESSOR ERROR]", error)
-        finally:
-            sensor_queue.task_done()
-
-
-# ============================================================
-# API
-# ============================================================
-@app.route("/api/data")
-def get_data():
-    with data_lock:
-        return jsonify(latest_data)
-
-@app.route("/api/clear_sos", methods=["POST"])
-def api_clear_sos():
-    clear_sos()
-    return jsonify({"status": "cleared"})
-
-@app.route("/api/demo/<int:zone>/<risk>", methods=["POST", "GET"])
-def api_demo_override(zone, risk):
-    """
-    LIVE DEMO CONTROL — open these URLs in a browser tab during the
-    presentation to force a zone's risk instantly:
-      http://127.0.0.1:5000/api/demo/2/CRITICAL
-      http://127.0.0.1:5000/api/demo/2/WARNING
-      http://127.0.0.1:5000/api/demo/2/SAFE
-      http://127.0.0.1:5000/api/demo/2/CLEAR   -> back to real hardware data
-    """
-    zone = int(zone)
-    risk = risk.upper()
-    if zone not in (1, 2):
-        return jsonify({"status": "error", "message": "zone must be 1 or 2"}), 400
-    if risk == "CLEAR":
-        manual_override[zone] = None
-        return jsonify({"status": "override cleared", "zone": zone})
-    if risk not in ("SAFE", "WARNING", "CRITICAL"):
-        return jsonify({"status": "error", "message": "risk must be SAFE/WARNING/CRITICAL/CLEAR"}), 400
-    manual_override[zone] = risk
-    process_zone(zone, {"mq7": 1650, "mq4": 400, "ax": 0, "ay": 0, "az": 0.98,
-                         "vibration": 0.3, "rssi": -55})
-    return jsonify({"status": "override set", "zone": zone, "risk": risk})
-
-@app.route("/")
-def index():
-    return render_template("index.html")
-
-
-if __name__ == "__main__":
-    print("MINE SAFETY SYSTEM — real hardware only (no simulator)")
-    print(f"Calibration: max {CALIBRATION_SAMPLES} samples OR {CALIBRATION_TIMEOUT_S}s timeout, whichever first")
-    print("Manual demo override still available: visit /api/demo/<zone>/<SAFE|WARNING|CRITICAL|CLEAR> in a browser tab")
-
-    print()
-    print("Available serial ports on this machine right now:")
-    ports = list(serial.tools.list_ports.comports())
-    if not ports:
-        print("  (none detected — check the gateway's USB cable/power)")
-    for p in ports:
-        marker = "  <-- configured SERIAL_PORT" if p.device == SERIAL_PORT else ""
-        print(f"  {p.device} — {p.description}{marker}")
-    if SERIAL_PORT not in [p.device for p in ports]:
-        print(f"  WARNING: configured SERIAL_PORT '{SERIAL_PORT}' is not in the list above!")
-    print()
-
-    threading.Thread(target=sensor_processor, daemon=True).start()
-    threading.Thread(target=serial_reader, daemon=True).start()
-    threading.Thread(target=serial_writer, daemon=True).start()
-    threading.Thread(target=dashboard_emitter, daemon=True).start()
-    threading.Thread(target=worker_offline_watchdog, daemon=True).start()
-    threading.Thread(target=no_data_watchdog, daemon=True).start()
-
-    socketio.run(app, host=HOST, port=PORT, debug=False, allow_unsafe_werkzeug=True)
+        }
+         if (app.phase === "warning") {
+             if (index === 1 || index === 2) {
+                node.tilt = (index === 1 ? 2.8 : 2.2) + noise();
+                node.disp = (index === 1 ? 12.4 : 9.5) + noise() * 10;
+                node.vib = 0.47 + noise();
+                node.mode = "ACTIVE";
+                node.risk = "WARNING";
+            } else {
+                node.mode = "WATCH";
+                node.risk = "WATCH";
+                node.crack = "No";
+            }
+        }
+         if (app.phase === "critical") {
+             if (index === 1 || index === 2) {
+                node.tilt = (index === 1 ? 5.8 : 4.9) + noise();
+                node.disp = (index === 1 ? 27.6 : 21.4) + noise() * 12;
+                node.vib = 0.92 + noise();
+                node.mode = "EMERGENCY";
+                node.risk = "CRITICAL";
+                node.crack = "YES";
+            } else if (index === 3) {
+                node.tilt = 1.7 + noise();
+                node.disp = 6.8 + noise() * 7;
+                node.vib = 0.28 + noise();
+                node.mode = "ACTIVE";
+                node.risk = "WATCH";
+            }
+        }
+         if (app.phase === "recovery") {
+             if (index === 1 || index === 2) {
+                node.tilt = (index === 1 ? 0.82 : 0.65) + noise();
+                node.disp = (index === 1 ? 3.2 : 2.7) + noise() * 4;
+                node.vib = 0.15 + noise();
+                node.mode = "RECOVERY";
+                node.risk = "WATCH";
+                node.crack = "LOGGED";
+            } else {
+                node.mode = "SLEEP";
+                node.risk = "SAFE";
+                node.crack = "No";
+            }
+        }
+        node.moisture = app.water && (index === 1 || index === 2) ? 80 + Math.floor(Math.random() * 5) : 12 + Math.floor(Math.random() * 6);
+        node.battery = Math.max(70, node.battery - Math.random() * 0.015);
+    }
+    );
+}
+ function drawLine(id, x1, y1, x2, y2, failed = false) {
+    const map = document.getElementById("map").getBoundingClientRect();
+    const startX = map.width * x1 / 100;
+    const startY = map.height * y1 / 100;
+    const endX = map.width * x2 / 100;
+    const endY = map.height * y2 / 100;
+    const dx = endX - startX;
+    const dy = endY - startY;
+    const line = document.getElementById(id);
+    line.style.left = startX + "px";
+    line.style.top = startY + "px";
+    line.style.width = Math.sqrt(dx * dx + dy * dy) + "px";
+    line.style.transform = `rotate(${Math.atan2(dy, dx) * 180 / Math.PI}deg)`;
+    line.style.borderTopColor = failed ? "#ef4444" : "#38bdf8";
+    line.style.borderTopStyle = failed ? "dashed" : "solid";
+    line.style.opacity = failed ? ".32" : ".75";
+}
+ function drawMapLinks() {
+    drawLine("l12", 24, 28, 54, 31);
+    drawLine("l23", 54, 31, 63, 61, app.relayFailure);
+    drawLine("l34", 29, 71, 63, 61);
+    drawLine("lgw", app.relayFailure ? 29 : 63, app.relayFailure ? 71 : 61, 87, 51);
+    drawLine("routeLine", 48, 52, app.phase === "safe" ? 78 : 80, app.phase === "safe" ? 80 : 18);
+    document.getElementById("routeLine").style.borderTopColor = app.phase === "critical" ? "#ef4444" : app.phase === "safe" ? "#22c55e" : "#fb923c";
+     if (app.relayFailure) {
+        document.getElementById("meshHealth").textContent = "74%";
+        document.getElementById("meshRoute").textContent = "N4 → GW Backup";
+        document.getElementById("hopCount").textContent = "2–3 hops";
+        document.getElementById("delivery").textContent = "91.2%";
+    } else {
+        document.getElementById("meshHealth").textContent = app.phase === "critical" ? "92%" : "96%";
+        document.getElementById("meshRoute").textContent = "N2 → GW";
+        document.getElementById("hopCount").textContent = "1–2 hops";
+        document.getElementById("delivery").textContent = "98.6%";
+    }
+}
+ function updateResponse(profile) {
+    const box = document.getElementById("alertBox");
+    const title = document.getElementById("alertTitle");
+    const text = document.getElementById("alertText");
+    const route = document.getElementById("routeText");
+    const worker = document.getElementById("worker");
+    const zone = document.getElementById("workerZone");
+    const tag = document.getElementById("tagState");
+    const buzzer = document.getElementById("buzzerState");
+    worker.classList.remove("alert");
+     if (app.phase === "safe") {
+        box.style.background = "rgba(22,101,52,.13)";
+        box.style.borderColor = "rgba(34,197,94,.28)";
+        title.textContent = "✓ No active emergency";
+        text.textContent = "All surface deformation readings remain within the calibrated baseline.";
+        route.innerHTML = "W07 → Access B → South Exit<br><span class='small'>Shortest safe route under normal conditions.</span>";
+        zone.textContent = "ZONE B";
+        tag.textContent = "HEARTBEAT OK";
+        buzzer.textContent = "OFF";
+        worker.style.left = "48%";
+        worker.style.top = "52%";
+    }
+     if (app.phase === "watch") {
+        box.style.background = "rgba(113,84,8,.15)";
+        box.style.borderColor = "rgba(250,204,21,.34)";
+        title.textContent = "◉ WATCH: Early deformation trend";
+        text.textContent = "Node 02 shows rising tilt and displacement. Adaptive sampling increased automatically.";
+        route.innerHTML = "Monitor W07 — evacuation not required yet<br><span class='small'>South Exit remains available.</span>";
+        tag.textContent = "HEARTBEAT OK";
+        buzzer.textContent = "OFF";
+    }
+     if (app.phase === "warning") {
+        box.style.background = "rgba(124,45,18,.18)";
+        box.style.borderColor = "rgba(251,146,60,.45)";
+        title.textContent = "⚠ WARNING: Correlated deformation";
+        text.textContent = "Nodes 02 and 03 show similar movement. GIS risk zone is expanding.";
+        route.innerHTML = "W07 → Access C → North Exit<br><span class='small'>North Exit is preselected as South corridor risk increases.</span>";
+        tag.textContent = "STANDBY ALERT";
+        buzzer.textContent = "OFF";
+    }
+     if (app.phase === "critical") {
+        box.style.background = "rgba(127,29,29,.27)";
+        box.style.borderColor = "rgba(239,68,68,.65)";
+        title.textContent = "⛔ CRITICAL: Subsidence warning";
+        text.textContent = "Crack detected with accelerating displacement, correlated nodes, and water accumulation in a low-elevation depression.";
+        route.innerHTML = "W07 → Access C → Ridge Path → NORTH EXIT<br><span class='small'>South route avoided: deformation risk + water accumulation + lower elevation.</span>";
+        zone.textContent = "AFFECTED ZONE B2";
+        tag.textContent = app.workerAlert ? "LORA ALERT DELIVERED" : "ALERT READY";
+        buzzer.textContent = app.workerAlert ? "BUZZER + LED ACTIVE" : "PENDING";
+         if (app.workerAlert) {
+            worker.classList.add("alert");
+            worker.style.left = "68%";
+            worker.style.top = "31%";
+        }
+    }
+     if (app.phase === "recovery") {
+        box.style.background = "rgba(113,84,8,.15)";
+        box.style.borderColor = "rgba(250,204,21,.34)";
+        title.textContent = "↻ RECOVERY MONITORING";
+        text.textContent = "Values are improving, but the system requires sustained stable readings before an all-clear.";
+        route.innerHTML = "Maintain North Exit preference until stability is confirmed<br><span class='small'>Hysteresis prevents a false all-clear.</span>";
+        tag.textContent = "ALERT ACKNOWLEDGED";
+        buzzer.textContent = "OFF AFTER ACK";
+        worker.style.left = "75%";
+        worker.style.top = "22%";
+    }
+}
+ function updateClock() {
+    const elapsed = Math.floor((Date.now() - app.startedAt) / 1000);
+    const h = String(Math.floor(elapsed / 3600)).padStart(2, "0");
+    const m = String(Math.floor((elapsed % 3600) / 60)).padStart(2, "0");
+    const s = String(elapsed % 60).padStart(2, "0");
+    document.getElementById("clock").textContent = `${h}:${m}:${s}`;
+    document.getElementById("syncText").textContent = `${Math.floor(Math.random() * 3) + 1}s ago`;
+}
+ function render() {
+    updateNodes();
+    const p = currentProfile();
+    const color = riskColor(p.state);
+    document.getElementById("modeText").textContent = p.mode;
+    document.getElementById("riskScore").textContent = p.score + "%";
+    document.getElementById("riskState").textContent = p.state;
+    document.getElementById("riskState").style.color = color;
+    document.getElementById("mapTitle").textContent = p.map;
+    document.getElementById("progress").style.width = p.progress;
+    document.getElementById("phaseLabel").textContent = p.label;
+    document.getElementById("tiltText").textContent = p.tilt;
+    document.getElementById("dispText").textContent = p.disp;
+    document.getElementById("crackText").textContent = p.crack;
+    document.getElementById("neighborText").textContent = p.neighbor;
+    document.getElementById("waterText").textContent = p.water;
+    const heat = document.getElementById("heat");
+    heat.style.width = p.heat[0] + "px";
+    heat.style.height = p.heat[1] + "px";
+    heat.style.opacity = p.heat[2];
+    const orb = document.getElementById("riskOrb");
+    orb.style.borderColor = color;
+    orb.style.boxShadow = `0 0 30px ${color}44, inset 0 0 20px ${color}16`;
+    document.getElementById("nodeList").innerHTML = app.nodes.map(node => ` <div class="node-row"> <div class="node-dot" style="background:${riskColor(node.risk)};color:${riskColor(node.risk)}"></div> <div class="node-info"> <div class="node-name">${node.id}</div> <div class="node-meta">${node.mode} • ${node.battery.toFixed(0)}% battery</div> </div> <div class="node-risk" style="color:${riskColor(node.risk)}">${node.risk}</div> </div> `).join("");
+    document.getElementById("telemetry").innerHTML = app.nodes.map(node => ` <tr> <td><b>${node.id}</b></td> <td>${node.tilt.toFixed(2)}°</td> <td>${node.disp.toFixed(1)} mm</td> <td>${node.vib.toFixed(2)} g</td> <td>${node.crack}</td> <td>${node.moisture}%</td> <td>${node.battery.toFixed(0)}%</td> <td>${node.rssi} dBm</td> <td style="color:#38bdf8;font-weight:bold">${node.mode}</td> <td><span class="badge" style="background:${riskColor(node.risk)}">${node.risk}</span></td> </tr> `).join("");
+     app.nodes.forEach((node, index) => {
+        const circle = document.querySelector(`#m${index + 1} .circle`);
+        circle.style.color = riskColor(node.risk);
+        circle.style.borderColor = riskColor(node.risk);
+        circle.style.boxShadow = `0 0 18px ${riskColor(node.risk)}`;
+    }
+    );
+    updateResponse(p);
+    drawMapLinks();
+    updateClock();
+}
+ function setPhase(phase) {
+    app.phase = phase;
+    render();
+}
+ function toggleWater() {
+    app.water = !app.water;
+    if (app.phase === "safe") app.phase = "watch";
+    render();
+}
+ function workerAlert() {
+    app.workerAlert = true;
+    app.phase = "critical";
+    app.water = true;
+    render();
+}
+ function toggleRelay() {
+    app.relayFailure = !app.relayFailure;
+    render();
+}
+ function recovery() {
+    app.phase = "recovery";
+    app.water = false;
+    app.workerAlert = false;
+    render();
+     setTimeout(() => {
+        app.phase = "watch";
+        render();
+    }, 5000);
+     setTimeout(() => {
+        app.phase = "safe";
+        render();
+    }, 10000);
+}
+ function resetDemo() {
+    app.phase = "safe";
+    app.water = false;
+    app.workerAlert = false;
+    app.relayFailure = false;
+    app.startedAt = Date.now();
+    render();
+}
+ function autoDemo() {
+    resetDemo();
+    setTimeout(() => setPhase("watch"), 2500);
+    setTimeout(() => setPhase("warning"), 6200);
+    setTimeout(() => setPhase("critical"), 9800);
+     setTimeout(() => {
+        app.water = true;
+        render();
+    }, 11600);
+    setTimeout(() => workerAlert(), 13500);
+    setTimeout(() => toggleRelay(), 16000);
+    setTimeout(() => recovery(), 19000);
+     setTimeout(() => {
+        if (app.relayFailure) toggleRelay();
+    }, 30500);
+}
+setInterval(render, 1800);
+window.addEventListener("resize", drawMapLinks);
+render();
+  </script>
+ </body>
+</html>
