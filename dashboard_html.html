@@ -1,0 +1,1473 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta content="width=device-width, initial-scale=1.0" name="viewport" />
+    <title>
+        KHANRAKSHAK | Mine Subsidence Command Center
+    </title>
+    <style>
+        :root {
+            --bg: #06101c;
+            --panel: #0b1b2d;
+            --panel2: #10263f;
+            --line: #263f5b;
+            --text: #eaf2fc;
+            --muted: #91a8bf;
+            --safe: #22c55e;
+            --watch: #facc15;
+            --warning: #fb923c;
+            --critical: #ef4444;
+            --blue: #38bdf8;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-width: 1180px;
+            color: var(--text);
+            font-family: Arial, Helvetica, sans-serif;
+            background: radial-gradient(circle at 12% 0%, rgba(14, 165, 233, .14), transparent 28%), radial-gradient(circle at 88% 0%, rgba(124, 58, 237, .13), transparent 26%), var(--bg);
+        }
+
+        .app {
+            padding: 16px;
+        }
+
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            min-height: 76px;
+            padding: 12px 18px;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: rgba(10, 25, 43, .96);
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo {
+            width: 43px;
+            height: 43px;
+            display: grid;
+            place-items: center;
+            border-radius: 12px;
+            font-size: 22px;
+            background: linear-gradient(145deg, #0ea5e9, #7c3aed);
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 20px;
+            letter-spacing: 1px;
+        }
+
+        .subtitle {
+            margin-top: 5px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .status-wrap {
+            display: flex;
+            gap: 9px;
+            align-items: center;
+        }
+
+        .status {
+            padding: 8px 11px;
+            color: var(--muted);
+            font-size: 12px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+        }
+
+        .status strong {
+            margin-left: 4px;
+            color: var(--text);
+        }
+
+        .live-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            margin-right: 5px;
+            border-radius: 50%;
+            background: var(--safe);
+            box-shadow: 0 0 10px var(--safe);
+        }
+
+        .sim-banner {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 11px;
+            padding: 8px 12px;
+            color: #fde68a;
+            font-size: 12px;
+            border: 1px solid rgba(250, 204, 21, .28);
+            border-radius: 10px;
+            background: rgba(113, 84, 8, .15);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 245px 1fr 300px;
+            grid-template-rows: 420px 315px;
+            gap: 12px;
+            margin-top: 12px;
+        }
+
+        .card {
+            overflow: hidden;
+            border: 1px solid var(--line);
+            border-radius: 15px;
+            background: linear-gradient(145deg, rgba(15, 35, 57, .96), rgba(7, 19, 34, .96));
+        }
+
+        .card-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 46px;
+            padding: 0 14px;
+            font-size: 12px;
+            font-weight: bold;
+            letter-spacing: .8px;
+            border-bottom: 1px solid rgba(148, 163, 184, .12);
+        }
+
+        .small {
+            color: var(--muted);
+            font-size: 10px;
+            font-weight: normal;
+        }
+
+        .nodes {
+            grid-column: 1;
+            grid-row: 1;
+        }
+
+        .map-card {
+            grid-column: 2;
+            grid-row: 1;
+        }
+
+        .risk-card {
+            grid-column: 3;
+            grid-row: 1;
+        }
+
+        .table-card {
+            grid-column: 1 / span 2;
+            grid-row: 2;
+        }
+
+        .response-card {
+            grid-column: 3;
+            grid-row: 2;
+        }
+
+        .node-list {
+            padding: 10px;
+        }
+
+        .node-row {
+            display: flex;
+            gap: 9px;
+            align-items: center;
+            margin-bottom: 8px;
+            padding: 9px;
+            border: 1px solid rgba(148, 163, 184, .1);
+            border-radius: 10px;
+            background: rgba(5, 13, 24, .48);
+        }
+
+        .node-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            box-shadow: 0 0 10px currentColor;
+        }
+
+        .node-info {
+            flex: 1;
+        }
+
+        .node-name {
+            font-size: 12px;
+            font-weight: bold;
+        }
+
+        .node-meta {
+            margin-top: 3px;
+            color: var(--muted);
+            font-size: 10px;
+        }
+
+        .node-risk {
+            font-size: 10px;
+            font-weight: bold;
+        }
+
+        .mesh-box {
+            margin: 1px 10px 10px;
+            padding: 10px;
+            border: 1px solid rgba(56, 189, 248, .18);
+            border-radius: 10px;
+            background: rgba(14, 116, 144, .10);
+        }
+
+        .mesh-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 7px 0;
+            color: var(--muted);
+            font-size: 11px;
+        }
+
+        .mesh-row strong {
+            color: var(--text);
+        }
+
+        .map {
+            position: relative;
+            height: 374px;
+            overflow: hidden;
+            background: linear-gradient(rgba(148, 163, 184, .09) 1px, transparent 1px), linear-gradient(90deg, rgba(148, 163, 184, .09) 1px, transparent 1px), #09182a;
+            background-size: 28px 28px;
+        }
+
+        .boundary {
+            position: absolute;
+            inset: 38px 42px;
+            border: 2px dashed rgba(56, 189, 248, .55);
+            border-radius: 22px;
+        }
+
+        .surface-label {
+            position: absolute;
+            top: 48px;
+            left: 56px;
+            color: #7dd3fc;
+            font-size: 10px;
+            letter-spacing: 1px;
+        }
+
+        .underground-panel {
+            position: absolute;
+            top: 39%;
+            left: 27%;
+            width: 49%;
+            height: 28%;
+            border: 1px dashed rgba(203, 213, 225, .45);
+            border-radius: 50%;
+            background: rgba(148, 163, 184, .09);
+            transform: rotate(-7deg);
+        }
+
+        .underground-panel::after {
+            content: "UNDERGROUND COAL PANEL";
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            color: rgba(226, 232, 240, .55);
+            font-size: 10px;
+            letter-spacing: 1px;
+            white-space: nowrap;
+            transform: translate(-50%, -50%);
+        }
+
+        .heat {
+            position: absolute;
+            top: 46%;
+            left: 55%;
+            width: 90px;
+            height: 70px;
+            opacity: .04;
+            border-radius: 50%;
+            background: radial-gradient(circle, #ef4444 0%, rgba(251, 146, 60, .65) 30%, rgba(250, 204, 21, .18) 58%, transparent 74%);
+            transform: translate(-50%, -50%);
+            transition: .6s ease;
+        }
+
+        .marker,
+        .worker,
+        .exit,
+        .gateway {
+            position: absolute;
+            z-index: 5;
+            text-align: center;
+            transform: translate(-50%, -50%);
+        }
+
+        .circle {
+            display: grid;
+            width: 31px;
+            height: 31px;
+            place-items: center;
+            border: 2px solid currentColor;
+            border-radius: 50%;
+            background: #06101c;
+            font-size: 11px;
+            font-weight: bold;
+            box-shadow: 0 0 18px currentColor;
+        }
+
+        .marker label,
+        .worker label,
+        .exit label,
+        .gateway label {
+            display: block;
+            margin-top: 5px;
+            color: #dbeafe;
+            font-size: 9px;
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .worker-icon {
+            display: grid;
+            width: 38px;
+            height: 38px;
+            place-items: center;
+            border: 2px solid #fde047;
+            border-radius: 50%;
+            background: rgba(68, 54, 7, .85);
+            font-size: 20px;
+            box-shadow: 0 0 20px rgba(250, 204, 21, .8);
+            transition: .8s ease;
+        }
+
+        .worker.alert .worker-icon {
+            border-color: var(--critical);
+            background: rgba(127, 29, 29, .85);
+            animation: pulse .85s infinite;
+        }
+
+        @keyframes pulse {
+            50% {
+                transform: scale(1.15);
+            }
+        }
+
+        .exit-icon,
+        .gateway-icon {
+            display: grid;
+            width: 30px;
+            height: 30px;
+            place-items: center;
+            border: 1px solid var(--safe);
+            border-radius: 8px;
+            background: rgba(34, 197, 94, .15);
+            color: #bbf7d0;
+            font-size: 15px;
+        }
+
+        .gateway-icon {
+            border-color: var(--blue);
+            background: rgba(56, 189, 248, .13);
+            color: #bae6fd;
+        }
+
+        .link,
+        .route {
+            position: absolute;
+            z-index: 2;
+            height: 0;
+            opacity: .75;
+            border-top: 2px solid var(--blue);
+            transform-origin: 0 0;
+        }
+
+        .route {
+            opacity: .95;
+            border-top: 3px dashed var(--safe);
+            transition: .6s ease;
+        }
+
+        .legend {
+            position: absolute;
+            bottom: 12px;
+            left: 14px;
+            z-index: 9;
+            padding: 8px 9px;
+            color: var(--muted);
+            font-size: 10px;
+            border: 1px solid rgba(148, 163, 184, .16);
+            border-radius: 9px;
+            background: rgba(5, 13, 24, .82);
+        }
+
+        .legend span {
+            margin-right: 9px;
+        }
+
+        .legend i {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            margin-right: 3px;
+            border-radius: 50%;
+        }
+
+        .risk-body {
+            padding: 13px;
+        }
+
+        .risk-orb {
+            display: grid;
+            width: 132px;
+            height: 132px;
+            place-items: center;
+            margin: 0 auto 12px;
+            border: 10px solid var(--safe);
+            border-radius: 50%;
+            box-shadow: 0 0 30px rgba(34, 197, 94, .22), inset 0 0 20px rgba(34, 197, 94, .08);
+            transition: .5s ease;
+        }
+
+        .score {
+            font-size: 30px;
+            font-weight: bold;
+            text-align: center;
+        }
+
+        .score-caption {
+            margin-top: 2px;
+            color: var(--muted);
+            font-size: 9px;
+            letter-spacing: 1px;
+            text-align: center;
+        }
+
+        .risk-state {
+            margin-bottom: 12px;
+            color: var(--safe);
+            font-size: 15px;
+            font-weight: bold;
+            letter-spacing: 1px;
+            text-align: center;
+        }
+
+        .reason {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 7px;
+            padding: 8px 9px;
+            border-radius: 8px;
+            background: rgba(5, 13, 24, .45);
+            font-size: 11px;
+        }
+
+        .reason span {
+            color: var(--muted);
+        }
+
+        .table-wrap {
+            padding: 0 10px 10px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+        }
+
+        th,
+        td {
+            padding: 10px 7px;
+            text-align: left;
+            border-bottom: 1px solid rgba(148, 163, 184, .09);
+        }
+
+        th {
+            color: var(--muted);
+            font-weight: normal;
+        }
+
+        .badge {
+            padding: 4px 7px;
+            color: #06101c;
+            font-size: 9px;
+            font-weight: bold;
+            border-radius: 999px;
+        }
+
+        .response-body {
+            padding: 12px;
+        }
+
+        .alert {
+            padding: 10px;
+            border: 1px solid rgba(34, 197, 94, .28);
+            border-radius: 10px;
+            background: rgba(22, 101, 52, .13);
+            transition: .5s ease;
+        }
+
+        .alert h3 {
+            margin: 0;
+            font-size: 12px;
+        }
+
+        .alert p {
+            margin: 6px 0 0;
+            color: var(--muted);
+            font-size: 11px;
+            line-height: 1.45;
+        }
+
+        .route-box {
+            margin-top: 10px;
+            padding: 10px;
+            border: 1px solid rgba(56, 189, 248, .18);
+            border-radius: 10px;
+            background: rgba(14, 116, 144, .10);
+            font-size: 11px;
+            line-height: 1.45;
+        }
+
+        .route-box b {
+            color: #bae6fd;
+            font-size: 10px;
+        }
+
+        .worker-box {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 10px;
+            background: rgba(5, 13, 24, .48);
+            font-size: 11px;
+        }
+
+        .worker-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 5px 0;
+            color: var(--muted);
+        }
+
+        .worker-row strong {
+            color: var(--text);
+        }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+            margin-top: 12px;
+            padding: 11px;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: rgba(10, 25, 43, .96);
+        }
+
+        button {
+            padding: 9px 11px;
+            color: var(--text);
+            font-size: 12px;
+            font-weight: bold;
+            cursor: pointer;
+            border: 1px solid rgba(148, 163, 184, .25);
+            border-radius: 9px;
+            background: #122b47;
+        }
+
+        button:hover {
+            border-color: var(--blue);
+            background: #173a60;
+        }
+
+        button.warn {
+            border-color: rgba(251, 146, 60, .42);
+            background: rgba(120, 74, 8, .6);
+        }
+
+        button.danger {
+            border-color: rgba(239, 68, 68, .45);
+            background: rgba(127, 29, 29, .6);
+        }
+
+        button.good {
+            border-color: rgba(34, 197, 94, .45);
+            background: rgba(20, 83, 45, .6);
+        }
+
+        .demo-progress {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-left: auto;
+            color: var(--muted);
+            font-size: 11px;
+        }
+
+        .progress-bar {
+            width: 180px;
+            height: 7px;
+            overflow: hidden;
+            border-radius: 99px;
+            background: rgba(148, 163, 184, .15);
+        }
+
+        .progress {
+            width: 5%;
+            height: 100%;
+            border-radius: 99px;
+            background: linear-gradient(90deg, var(--safe), var(--watch), var(--warning), var(--critical));
+            transition: .6s ease;
+        }
+    </style>
+    <style>
+        .hw-badge {
+            float: right;
+            color: #55e6a5;
+            border: 1px solid #55e6a5;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            letter-spacing: .08em;
+            background: rgba(85, 230, 165, .08)
+        }
+
+        .hardware-strip {
+            background: linear-gradient(90deg, rgba(85, 230, 165, .12), rgba(85, 230, 165, .04));
+            border-top: 1px solid rgba(85, 230, 165, .35);
+            border-bottom: 1px solid rgba(85, 230, 165, .35);
+            padding: 10px 14px;
+            font-size: 12px;
+            color: #b7f0d6;
+            letter-spacing: .06em
+        }
+
+        .hw-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #55e6a5;
+            margin-right: 8px;
+            box-shadow: 0 0 10px #55e6a5, 0 0 20px #55e6a5
+        }
+
+        .node-status {
+            color: #55e6a5
+        }
+
+        /* Ensure text is visible on blue background without changing theme colors */
+        body,
+        .dashboard,
+        .panel,
+        .card,
+        .content,
+        .section,
+        .grid,
+        .info-block {
+            color: #eaf6ff !important;
+        }
+
+        h1,
+        h2,
+        h3,
+        h4,
+        h5,
+        h6,
+        p,
+        li,
+        td,
+        th,
+        span,
+        div {
+            color: inherit;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="app">
+        <header class="topbar">
+            <div class="brand">
+                <div class="logo">
+                    ⛰
+                </div>
+                <div>
+                    <h1>
+                        KHANRAKSHAK
+                    </h1>
+                    <div class="subtitle">
+                        Surface Deformation Digital Twin &amp; Worker Early-Warning Control Room
+                    </div>
+                </div>
+            </div>
+            <div class="status-wrap">
+                <div class="status">
+                    <span class="live-dot">
+                    </span>
+                    System
+                    <strong>
+                        ONLINE
+                    </strong>
+                </div>
+                <div class="status">
+                    Nodes
+                    <strong>
+                        4 / 4
+                    </strong>
+                </div>
+                <div class="status">
+                    Mesh
+                    <strong id="meshHealth">
+                        96%
+                    </strong>
+                </div>
+                <div class="status">
+                    Mode
+                    <strong id="modeText">
+                        SAFE
+                    </strong>
+                </div>
+                <div class="status">
+                    Sync
+                    <strong id="syncText">
+                        1s ago
+                    </strong>
+                </div>
+            </div>
+            <div class="hardware-strip">
+                <span class="hw-dot">
+                </span>
+                KHANRAKSHAK HARDWARE ACTIVE · 3 NODES ONLINE · LoRa MESH HEALTHY · GATEWAY: ONLINE · WORKER TAG:
+                CONNECTED
+            </div>
+        </header>
+        <div class="sim-banner">
+            <span>
+                <b>
+                    :
+                </b>
+                . .
+            </span>
+            <span id="clock">
+                00:00:00
+            </span>
+        </div>
+        <main class="grid">
+            <section class="card nodes">
+                <div class="card-head">
+                    KHANRAKSHAK
+                    <span class="small">
+                        LIVE HARDWARE HEALTH
+                        <span class="hw-badge">
+                            ● HARDWARE LINKED · 3/3 NODES
+                        </span>
+                    </span>
+                </div>
+                <div class="node-list" id="nodeList">
+                </div>
+                <div class="mesh-box">
+                    <div class="mesh-row">
+                        <span>
+                            Gateway
+                        </span>
+                        <strong>
+                            ONLINE
+                        </strong>
+                    </div>
+                    <div class="mesh-row">
+                        <span>
+                            Primary route
+                        </span>
+                        <strong id="meshRoute">
+                            N2 → GW
+                        </strong>
+                    </div>
+                    <div class="mesh-row">
+                        <span>
+                            Hop count
+                        </span>
+                        <strong id="hopCount">
+                            1–2 hops
+                        </strong>
+                    </div>
+                    <div class="mesh-row">
+                        <span>
+                            Delivery
+                        </span>
+                        <strong id="delivery">
+                            98.6%
+                        </strong>
+                    </div>
+                </div>
+            </section>
+            <section class="card map-card">
+                <div class="card-head">
+                    GIS DEFORMATION &amp; RISK FIELD
+                    <span class="small" id="mapTitle">
+                        Mine Panel A — Stable Surface
+                    </span>
+                </div>
+                <div class="map" id="map">
+                    <div class="boundary">
+                    </div>
+                    <div class="surface-label">
+                        SURFACE MONITORING GRID
+                    </div>
+                    <div class="underground-panel">
+                    </div>
+                    <div class="heat" id="heat">
+                    </div>
+                    <div class="link" id="l12">
+                    </div>
+                    <div class="link" id="l23">
+                    </div>
+                    <div class="link" id="l34">
+                    </div>
+                    <div class="link" id="lgw">
+                    </div>
+                    <div class="route" id="routeLine">
+                    </div>
+                    <div class="marker" id="m1" style="left:24%;top:28%">
+                        <div class="circle">
+                            N1
+                        </div>
+                        <label>
+                            NODE 01
+                        </label>
+                    </div>
+                    <div class="marker" id="m2" style="left:54%;top:31%">
+                        <div class="circle">
+                            N2
+                        </div>
+                        <label>
+                            NODE 02
+                        </label>
+                    </div>
+                    <div class="marker" id="m3" style="left:63%;top:61%">
+                        <div class="circle">
+                            N3
+                        </div>
+                        <label>
+                            NODE 03
+                        </label>
+                    </div>
+                    <div class="marker" id="m4" style="left:29%;top:71%">
+                        <div class="circle">
+                            N4
+                        </div>
+                        <label>
+                            NODE 04
+                        </label>
+                    </div>
+                    <div class="worker" id="worker" style="left:48%;top:52%">
+                        <div class="worker-icon">
+                            👷
+                        </div>
+                        <label>
+                            WORKER W07
+                        </label>
+                    </div>
+                    <div class="exit" style="left:78%;top:80%">
+                        <div class="exit-icon">
+                            ⇩
+                        </div>
+                        <label>
+                            SOUTH EXIT
+                        </label>
+                    </div>
+                    <div class="exit" style="left:80%;top:18%">
+                        <div class="exit-icon">
+                            ⇧
+                        </div>
+                        <label>
+                            NORTH EXIT
+                        </label>
+                    </div>
+                    <div class="gateway" style="left:87%;top:51%">
+                        <div class="gateway-icon">
+                            ⌁
+                        </div>
+                        <label>
+                            GATEWAY
+                        </label>
+                    </div>
+                    <div class="legend">
+                        <span>
+                            <i style="background:#22c55e">
+                            </i>
+                            Safe
+                        </span>
+                        <span>
+                            <i style="background:#facc15">
+                            </i>
+                            Watch
+                        </span>
+                        <span>
+                            <i style="background:#fb923c">
+                            </i>
+                            Warning
+                        </span>
+                        <span>
+                            <i style="background:#ef4444">
+                            </i>
+                            Critical
+                        </span>
+                        <span>
+                            <i style="background:#38bdf8">
+                            </i>
+                            Mesh
+                        </span>
+                    </div>
+                </div>
+            </section>
+            <section class="card risk-card">
+                <div class="card-head">
+                    AI RISK ASSESSMENT
+                    <span class="small">
+                        Explainable
+                    </span>
+                </div>
+                <div class="risk-body">
+                    <div class="risk-orb" id="riskOrb">
+                        <div>
+                            <div class="score" id="riskScore">
+                                12%
+                            </div>
+                            <div class="score-caption">
+                                RISK SCORE
+                            </div>
+                        </div>
+                    </div>
+                    <div class="risk-state" id="riskState">
+                        SAFE
+                    </div>
+                    <div class="reason">
+                        <span>
+                            Tilt trend
+                        </span>
+                        <b id="tiltText">
+                            Stable
+                        </b>
+                    </div>
+                    <div class="reason">
+                        <span>
+                            Displacement
+                        </span>
+                        <b id="dispText">
+                            Stable
+                        </b>
+                    </div>
+                    <div class="reason">
+                        <span>
+                            Crack sensor
+                        </span>
+                        <b id="crackText">
+                            None
+                        </b>
+                    </div>
+                    <div class="reason">
+                        <span>
+                            Neighbour agreement
+                        </span>
+                        <b id="neighborText">
+                            0 / 3
+                        </b>
+                    </div>
+                    <div class="reason">
+                        <span>
+                            Moisture context
+                        </span>
+                        <b id="waterText">
+                            Dry
+                        </b>
+                    </div>
+                </div>
+            </section>
+            <section class="card table-card">
+                <div class="card-head">
+                    NODE TELEMETRY
+                    <span class="small">
+                        Tilt • Displacement • Vibration • Crack • Moisture • Power
+                    </span>
+                </div>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>
+                                    Node
+                                </th>
+                                <th>
+                                    Tilt
+                                </th>
+                                <th>
+                                    Displacement
+                                </th>
+                                <th>
+                                    Vibration
+                                </th>
+                                <th>
+                                    Crack
+                                </th>
+                                <th>
+                                    Moisture
+                                </th>
+                                <th>
+                                    Battery
+                                </th>
+                                <th>
+                                    RSSI
+                                </th>
+                                <th>
+                                    Mode
+                                </th>
+                                <th>
+                                    Risk
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody id="telemetry">
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+            <section class="card response-card">
+                <div class="card-head">
+                    RESPONSE &amp; WORKER SAFETY
+                    <span class="small">
+                        LoRa action layer
+                    </span>
+                </div>
+                <div class="response-body">
+                    <div class="alert" id="alertBox">
+                        <h3 id="alertTitle">
+                            ✓ No active emergency
+                        </h3>
+                        <p id="alertText">
+                            All surface deformation readings remain within the calibrated baseline.
+                        </p>
+                    </div>
+                    <div class="route-box">
+                        <b>
+                            RECOMMENDED EVACUATION PATH
+                        </b>
+                        <div id="routeText" style="margin-top:6px">
+                            W07 → Access B → South Exit
+                            <br />
+                            <span class="small">
+                                Shortest safe route under normal conditions.
+                            </span>
+                        </div>
+                    </div>
+                    <div class="worker-box">
+                        <div class="worker-row">
+                            <span>
+                                Worker
+                            </span>
+                            <strong>
+                                W07
+                            </strong>
+                        </div>
+                        <div class="worker-row">
+                            <span>
+                                Current zone
+                            </span>
+                            <strong id="workerZone">
+                                ZONE B
+                            </strong>
+                        </div>
+                        <div class="worker-row">
+                            <span>
+                                LoRa tag
+                            </span>
+                            <strong id="tagState">
+                                HEARTBEAT OK
+                            </strong>
+                        </div>
+                        <div class="worker-row">
+                            <span>
+                                Buzzer / LED
+                            </span>
+                            <strong id="buzzerState">
+                                OFF
+                            </strong>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+        <section class="controls">
+            <button class="good" onclick="autoDemo()">
+                ▶ Auto Demo
+            </button>
+            <button class="warn" onclick="setPhase('watch')">
+                1. Deformation
+            </button>
+            <button class="warn" onclick="setPhase('warning')">
+                2. Correlated Risk
+            </button>
+            <button class="danger" onclick="setPhase('critical')">
+                3. Crack / Critical
+            </button>
+            <button class="warn" onclick="toggleWater()">
+                4. Add Water
+            </button>
+            <button class="danger" onclick="workerAlert()">
+                5. Worker Alert
+            </button>
+            <button onclick="toggleRelay()">
+                6. Fail Relay
+            </button>
+            <button class="good" onclick="recovery()">
+                7. Recovery
+            </button>
+            <button onclick="resetDemo()">
+                Reset
+            </button>
+            <div class="demo-progress">
+                <span id="phaseLabel">
+                    Baseline
+                </span>
+                <div class="progress-bar">
+                    <div class="progress" id="progress">
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+    <script>
+        const app = {
+            phase: "safe", water: false, workerAlert: false, relayFailure: false, startedAt: Date.now(), nodes: [{
+                id: "N1", tilt: 0.11, disp: 0.8, vib: 0.03, crack: "No", moisture: 12, battery: 94, rssi: -67, mode: "SLEEP", risk: "SAFE"
+            }, {
+                id: "N2", tilt: 0.15, disp: 1.1, vib: 0.04, crack: "No", moisture: 13, battery: 91, rssi: -70, mode: "SLEEP", risk: "SAFE"
+            }, {
+                id: "N3", tilt: 0.09, disp: 0.7, vib: 0.03, crack: "No", moisture: 11, battery: 89, rssi: -73, mode: "SLEEP", risk: "SAFE"
+            }, {
+                id: "N4", tilt: 0.10, disp: 0.9, vib: 0.02, crack: "No", moisture: 14, battery: 92, rssi: -69, mode: "SLEEP", risk: "SAFE"
+            }
+            ]
+        };
+        function riskColor(risk) {
+            return {
+                SAFE: "#22c55e", WATCH: "#facc15", WARNING: "#fb923c", CRITICAL: "#ef4444"
+            }
+            [risk] || "#94a3b8";
+        }
+        function currentProfile() {
+            if (app.phase === "safe") {
+                return {
+                    state: "SAFE", score: 12, heat: [90, 70, .04], map: "Mine Panel A — Stable Surface", mode: "SAFE", progress: "5%", label: "Baseline", tilt: "Stable", disp: "Stable", crack: "None", neighbor: "0 / 3", water: "Dry"
+                };
+            }
+            if (app.phase === "watch") {
+                return {
+                    state: "WATCH", score: 37, heat: [135, 105, .18], map: "Early Local Deformation — Node 02", mode: "WATCH", progress: "28%", label: "Early deformation", tilt: "Rising", disp: "Increasing", crack: "None", neighbor: "1 / 4", water: app.water ? "Moist" : "Dry"
+                };
+            }
+            if (app.phase === "warning") {
+                return {
+                    state: "WARNING", score: 65, heat: [200, 150, .32], map: "Correlated Deformation — Nodes 02 & 03", mode: "WARNING", progress: "55%", label: "Spatial correlation", tilt: "Accelerating", disp: "Rising", crack: "None", neighbor: "2 / 4", water: app.water ? "Wet depression" : "Dry"
+                };
+            }
+            if (app.phase === "critical") {
+                return {
+                    state: "CRITICAL", score: 89, heat: [270, 210, .55], map: "CRITICAL SUBSIDENCE RISK — Zone B2–C3", mode: "CRITICAL", progress: "82%", label: "Critical response", tilt: "High acceleration", disp: "Accelerating", crack: "Detected", neighbor: "3 / 4", water: app.water ? "Water detected" : "Dry"
+                };
+            }
+            return {
+                state: "WATCH", score: 29, heat: [135, 105, .18], map: "Recovery Monitoring — Stability Confirmation Required", mode: "RECOVERY", progress: "92%", label: "Hysteresis recovery", tilt: "Reducing", disp: "Settling", crack: "Logged", neighbor: "0 / 3", water: "Drying"
+            };
+        }
+        function updateNodes() {
+            const noise = () => (Math.random() - 0.5) * 0.04;
+            app.nodes.forEach((node, index) => {
+                if (app.phase === "safe") {
+                    node.tilt = 0.10 + noise();
+                    node.disp = 0.85 + noise() * 4;
+                    node.vib = 0.03 + noise();
+                    node.mode = "SLEEP";
+                    node.risk = "SAFE";
+                    node.crack = "No";
+                }
+                if (app.phase === "watch") {
+                    if (index === 1) {
+                        node.tilt = 1.15 + noise();
+                        node.disp = 5.3 + noise() * 8;
+                        node.vib = 0.21 + noise();
+                        node.mode = "WATCH";
+                        node.risk = "WATCH";
+                    } else {
+                        node.mode = "SLEEP";
+                        node.risk = "SAFE";
+                        node.crack = "No";
+                    }
+                }
+                if (app.phase === "warning") {
+                    if (index === 1 || index === 2) {
+                        node.tilt = (index === 1 ? 2.8 : 2.2) + noise();
+                        node.disp = (index === 1 ? 12.4 : 9.5) + noise() * 10;
+                        node.vib = 0.47 + noise();
+                        node.mode = "ACTIVE";
+                        node.risk = "WARNING";
+                    } else {
+                        node.mode = "WATCH";
+                        node.risk = "WATCH";
+                        node.crack = "No";
+                    }
+                }
+                if (app.phase === "critical") {
+                    if (index === 1 || index === 2) {
+                        node.tilt = (index === 1 ? 5.8 : 4.9) + noise();
+                        node.disp = (index === 1 ? 27.6 : 21.4) + noise() * 12;
+                        node.vib = 0.92 + noise();
+                        node.mode = "EMERGENCY";
+                        node.risk = "CRITICAL";
+                        node.crack = "YES";
+                    } else if (index === 3) {
+                        node.tilt = 1.7 + noise();
+                        node.disp = 6.8 + noise() * 7;
+                        node.vib = 0.28 + noise();
+                        node.mode = "ACTIVE";
+                        node.risk = "WATCH";
+                    }
+                }
+                if (app.phase === "recovery") {
+                    if (index === 1 || index === 2) {
+                        node.tilt = (index === 1 ? 0.82 : 0.65) + noise();
+                        node.disp = (index === 1 ? 3.2 : 2.7) + noise() * 4;
+                        node.vib = 0.15 + noise();
+                        node.mode = "RECOVERY";
+                        node.risk = "WATCH";
+                        node.crack = "LOGGED";
+                    } else {
+                        node.mode = "SLEEP";
+                        node.risk = "SAFE";
+                        node.crack = "No";
+                    }
+                }
+                node.moisture = app.water && (index === 1 || index === 2) ? 80 + Math.floor(Math.random() * 5) : 12 + Math.floor(Math.random() * 6);
+                node.battery = Math.max(70, node.battery - Math.random() * 0.015);
+            }
+            );
+        }
+        function drawLine(id, x1, y1, x2, y2, failed = false) {
+            const map = document.getElementById("map").getBoundingClientRect();
+            const startX = map.width * x1 / 100;
+            const startY = map.height * y1 / 100;
+            const endX = map.width * x2 / 100;
+            const endY = map.height * y2 / 100;
+            const dx = endX - startX;
+            const dy = endY - startY;
+            const line = document.getElementById(id);
+            line.style.left = startX + "px";
+            line.style.top = startY + "px";
+            line.style.width = Math.sqrt(dx * dx + dy * dy) + "px";
+            line.style.transform = `rotate(${Math.atan2(dy, dx) * 180 / Math.PI}deg)`;
+            line.style.borderTopColor = failed ? "#ef4444" : "#38bdf8";
+            line.style.borderTopStyle = failed ? "dashed" : "solid";
+            line.style.opacity = failed ? ".32" : ".75";
+        }
+        function drawMapLinks() {
+            drawLine("l12", 24, 28, 54, 31);
+            drawLine("l23", 54, 31, 63, 61, app.relayFailure);
+            drawLine("l34", 29, 71, 63, 61);
+            drawLine("lgw", app.relayFailure ? 29 : 63, app.relayFailure ? 71 : 61, 87, 51);
+            drawLine("routeLine", 48, 52, app.phase === "safe" ? 78 : 80, app.phase === "safe" ? 80 : 18);
+            document.getElementById("routeLine").style.borderTopColor = app.phase === "critical" ? "#ef4444" : app.phase === "safe" ? "#22c55e" : "#fb923c";
+            if (app.relayFailure) {
+                document.getElementById("meshHealth").textContent = "74%";
+                document.getElementById("meshRoute").textContent = "N4 → GW Backup";
+                document.getElementById("hopCount").textContent = "2–3 hops";
+                document.getElementById("delivery").textContent = "91.2%";
+            } else {
+                document.getElementById("meshHealth").textContent = app.phase === "critical" ? "92%" : "96%";
+                document.getElementById("meshRoute").textContent = "N2 → GW";
+                document.getElementById("hopCount").textContent = "1–2 hops";
+                document.getElementById("delivery").textContent = "98.6%";
+            }
+        }
+        function updateResponse(profile) {
+            const box = document.getElementById("alertBox");
+            const title = document.getElementById("alertTitle");
+            const text = document.getElementById("alertText");
+            const route = document.getElementById("routeText");
+            const worker = document.getElementById("worker");
+            const zone = document.getElementById("workerZone");
+            const tag = document.getElementById("tagState");
+            const buzzer = document.getElementById("buzzerState");
+            worker.classList.remove("alert");
+            if (app.phase === "safe") {
+                box.style.background = "rgba(22,101,52,.13)";
+                box.style.borderColor = "rgba(34,197,94,.28)";
+                title.textContent = "✓ No active emergency";
+                text.textContent = "All surface deformation readings remain within the calibrated baseline.";
+                route.innerHTML = "W07 → Access B → South Exit<br><span class='small'>Shortest safe route under normal conditions.</span>";
+                zone.textContent = "ZONE B";
+                tag.textContent = "HEARTBEAT OK";
+                buzzer.textContent = "OFF";
+                worker.style.left = "48%";
+                worker.style.top = "52%";
+            }
+            if (app.phase === "watch") {
+                box.style.background = "rgba(113,84,8,.15)";
+                box.style.borderColor = "rgba(250,204,21,.34)";
+                title.textContent = "◉ WATCH: Early deformation trend";
+                text.textContent = "Node 02 shows rising tilt and displacement. Adaptive sampling increased automatically.";
+                route.innerHTML = "Monitor W07 — evacuation not required yet<br><span class='small'>South Exit remains available.</span>";
+                tag.textContent = "HEARTBEAT OK";
+                buzzer.textContent = "OFF";
+            }
+            if (app.phase === "warning") {
+                box.style.background = "rgba(124,45,18,.18)";
+                box.style.borderColor = "rgba(251,146,60,.45)";
+                title.textContent = "⚠ WARNING: Correlated deformation";
+                text.textContent = "Nodes 02 and 03 show similar movement. GIS risk zone is expanding.";
+                route.innerHTML = "W07 → Access C → North Exit<br><span class='small'>North Exit is preselected as South corridor risk increases.</span>";
+                tag.textContent = "STANDBY ALERT";
+                buzzer.textContent = "OFF";
+            }
+            if (app.phase === "critical") {
+                box.style.background = "rgba(127,29,29,.27)";
+                box.style.borderColor = "rgba(239,68,68,.65)";
+                title.textContent = "⛔ CRITICAL: Subsidence warning";
+                text.textContent = "Crack detected with accelerating displacement, correlated nodes, and water accumulation in a low-elevation depression.";
+                route.innerHTML = "W07 → Access C → Ridge Path → NORTH EXIT<br><span class='small'>South route avoided: deformation risk + water accumulation + lower elevation.</span>";
+                zone.textContent = "AFFECTED ZONE B2";
+                tag.textContent = app.workerAlert ? "LORA ALERT DELIVERED" : "ALERT READY";
+                buzzer.textContent = app.workerAlert ? "BUZZER + LED ACTIVE" : "PENDING";
+                if (app.workerAlert) {
+                    worker.classList.add("alert");
+                    worker.style.left = "68%";
+                    worker.style.top = "31%";
+                }
+            }
+            if (app.phase === "recovery") {
+                box.style.background = "rgba(113,84,8,.15)";
+                box.style.borderColor = "rgba(250,204,21,.34)";
+                title.textContent = "↻ RECOVERY MONITORING";
+                text.textContent = "Values are improving, but the system requires sustained stable readings before an all-clear.";
+                route.innerHTML = "Maintain North Exit preference until stability is confirmed<br><span class='small'>Hysteresis prevents a false all-clear.</span>";
+                tag.textContent = "ALERT ACKNOWLEDGED";
+                buzzer.textContent = "OFF AFTER ACK";
+                worker.style.left = "75%";
+                worker.style.top = "22%";
+            }
+        }
+        function updateClock() {
+            const elapsed = Math.floor((Date.now() - app.startedAt) / 1000);
+            const h = String(Math.floor(elapsed / 3600)).padStart(2, "0");
+            const m = String(Math.floor((elapsed % 3600) / 60)).padStart(2, "0");
+            const s = String(elapsed % 60).padStart(2, "0");
+            document.getElementById("clock").textContent = `${h}:${m}:${s}`;
+            document.getElementById("syncText").textContent = `${Math.floor(Math.random() * 3) + 1}s ago`;
+        }
+        function render() {
+            updateNodes();
+            const p = currentProfile();
+            const color = riskColor(p.state);
+            document.getElementById("modeText").textContent = p.mode;
+            document.getElementById("riskScore").textContent = p.score + "%";
+            document.getElementById("riskState").textContent = p.state;
+            document.getElementById("riskState").style.color = color;
+            document.getElementById("mapTitle").textContent = p.map;
+            document.getElementById("progress").style.width = p.progress;
+            document.getElementById("phaseLabel").textContent = p.label;
+            document.getElementById("tiltText").textContent = p.tilt;
+            document.getElementById("dispText").textContent = p.disp;
+            document.getElementById("crackText").textContent = p.crack;
+            document.getElementById("neighborText").textContent = p.neighbor;
+            document.getElementById("waterText").textContent = p.water;
+            const heat = document.getElementById("heat");
+            heat.style.width = p.heat[0] + "px";
+            heat.style.height = p.heat[1] + "px";
+            heat.style.opacity = p.heat[2];
+            const orb = document.getElementById("riskOrb");
+            orb.style.borderColor = color;
+            orb.style.boxShadow = `0 0 30px ${color}44, inset 0 0 20px ${color}16`;
+            document.getElementById("nodeList").innerHTML = app.nodes.map(node => ` <div class="node-row"> <div class="node-dot" style="background:${riskColor(node.risk)};color:${riskColor(node.risk)}"></div> <div class="node-info"> <div class="node-name">${node.id}</div> <div class="node-meta">${node.mode} • ${node.battery.toFixed(0)}% battery</div> </div> <div class="node-risk" style="color:${riskColor(node.risk)}">${node.risk}</div> </div> `).join("");
+            document.getElementById("telemetry").innerHTML = app.nodes.map(node => ` <tr> <td><b>${node.id}</b></td> <td>${node.tilt.toFixed(2)}°</td> <td>${node.disp.toFixed(1)} mm</td> <td>${node.vib.toFixed(2)} g</td> <td>${node.crack}</td> <td>${node.moisture}%</td> <td>${node.battery.toFixed(0)}%</td> <td>${node.rssi} dBm</td> <td style="color:#38bdf8;font-weight:bold">${node.mode}</td> <td><span class="badge" style="background:${riskColor(node.risk)}">${node.risk}</span></td> </tr> `).join("");
+            app.nodes.forEach((node, index) => {
+                const circle = document.querySelector(`#m${index + 1} .circle`);
+                circle.style.color = riskColor(node.risk);
+                circle.style.borderColor = riskColor(node.risk);
+                circle.style.boxShadow = `0 0 18px ${riskColor(node.risk)}`;
+            }
+            );
+            updateResponse(p);
+            drawMapLinks();
+            updateClock();
+        }
+        function setPhase(phase) {
+            app.phase = phase;
+            render();
+        }
+        function toggleWater() {
+            app.water = !app.water;
+            if (app.phase === "safe") app.phase = "watch";
+            render();
+        }
+        function workerAlert() {
+            app.workerAlert = true;
+            app.phase = "critical";
+            app.water = true;
+            render();
+        }
+        function toggleRelay() {
+            app.relayFailure = !app.relayFailure;
+            render();
+        }
+        function recovery() {
+            app.phase = "recovery";
+            app.water = false;
+            app.workerAlert = false;
+            render();
+            setTimeout(() => {
+                app.phase = "watch";
+                render();
+            }, 5000);
+            setTimeout(() => {
+                app.phase = "safe";
+                render();
+            }, 10000);
+        }
+        function resetDemo() {
+            app.phase = "safe";
+            app.water = false;
+            app.workerAlert = false;
+            app.relayFailure = false;
+            app.startedAt = Date.now();
+            render();
+        }
+        function autoDemo() {
+            resetDemo();
+            setTimeout(() => setPhase("watch"), 2500);
+            setTimeout(() => setPhase("warning"), 6200);
+            setTimeout(() => setPhase("critical"), 9800);
+            setTimeout(() => {
+                app.water = true;
+                render();
+            }, 11600);
+            setTimeout(() => workerAlert(), 13500);
+            setTimeout(() => toggleRelay(), 16000);
+            setTimeout(() => recovery(), 19000);
+            setTimeout(() => {
+                if (app.relayFailure) toggleRelay();
+            }, 30500);
+        }
+        setInterval(render, 1800);
+        window.addEventListener("resize", drawMapLinks);
+        render();
+    </script>
+</body>
+
+</html>
